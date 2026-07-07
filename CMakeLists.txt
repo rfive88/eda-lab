@@ -12,3 +12,19 @@ add_subdirectory(third_party/openroad EXCLUDE_FROM_ALL)
 
 add_executable(hello_odb src/dbio/hello_odb.cpp)
 target_link_libraries(hello_odb PRIVATE odb utl)
+
+add_library(hypergraph src/hypergraph/hypergraph.cpp)
+target_include_directories(hypergraph PUBLIC src)
+target_link_libraries(hypergraph PUBLIC odb utl)
+
+enable_testing()
+find_package(GTest REQUIRED)
+
+add_executable(hypergraph_test test/hypergraph_test.cpp)
+target_compile_definitions(hypergraph_test
+                           PRIVATE EDA_LAB_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
+target_link_libraries(hypergraph_test PRIVATE hypergraph odb utl
+                                              GTest::gtest GTest::gtest_main)
+
+include(GoogleTest)
+add_test(NAME hypergraph_test COMMAND hypergraph_test)

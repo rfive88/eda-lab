@@ -5,7 +5,9 @@
     "context": ".."
   },
   "workspaceFolder": "/workspace",
-  "mounts": [],
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached"
+  ],
   "customizations": {
     "vscode": {
       "extensions": [

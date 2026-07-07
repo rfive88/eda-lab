@@ -37,14 +37,14 @@ class HypergraphTest : public ::testing::Test
         (data_dir + "/nangate45/Nangate45_stdcell.lef").c_str());
     ASSERT_NE(cell_lib, nullptr);
 
+    // readChip at the pinned OpenROAD SHA requires a pre-created chip.
+    odb::dbChip* chip = odb::dbChip::create(db_, tech_lib->getTech(), "gcd");
+    ASSERT_NE(chip, nullptr);
     odb::defin def_reader(db_, logger_);
     std::vector<odb::dbLib*> search_libs = {tech_lib, cell_lib};
-    def_reader.readChip(search_libs,
-                        (data_dir + "/gcd_nangate45.def").c_str(),
-                        nullptr,
-                        false);
-    ASSERT_NE(db_->getChip(), nullptr);
-    block_ = db_->getChip()->getBlock();
+    def_reader.readChip(
+        search_libs, (data_dir + "/gcd_nangate45.def").c_str(), chip, false);
+    block_ = chip->getBlock();
     ASSERT_NE(block_, nullptr);
   }
 

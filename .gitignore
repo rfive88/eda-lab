@@ -1,0 +1,5 @@
+build/
+build-release/
+out.def
+out.odb
+__pycache__/

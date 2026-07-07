@@ -26,17 +26,17 @@ int main(int argc, char** argv) {
   odb::dbLib* cell_lib = lef_reader.createLib(tech, "nangate", argv[2]);
 
   std::cout << "LEFs loaded. Now reading DEF: " << argv[3] << "\n";
+  // readChip at the pinned OpenROAD SHA requires a pre-created chip.
+  odb::dbChip* chip = odb::dbChip::create(db, tech, "chip");
   odb::defin def_reader(db, &logger);
   std::vector<odb::dbLib*> search_libs = {tech_lib, cell_lib};
-  def_reader.readChip(search_libs, argv[3], nullptr, false);
+  def_reader.readChip(search_libs, argv[3], chip, false);
 
-  odb::dbChip* chip = db->getChip();
-  if (!chip) {
+  odb::dbBlock* block = chip->getBlock();
+  if (!block) {
     std::cerr << "Failed to read chip from DEF\n";
     return 1;
   }
-  
-  odb::dbBlock* block = chip->getBlock();
 
   std::cout << "Instances: " << block->getInsts().size() << "\n";
   std::cout << "Nets: " << block->getNets().size() << "\n";

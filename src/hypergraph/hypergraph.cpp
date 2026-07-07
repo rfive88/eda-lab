@@ -1,3 +1,5 @@
+// See hypergraph.h for the CSR layout and dbId-vs-index semantics.
+
 #include "hypergraph/hypergraph.h"
 
 #include "odb/db.h"
@@ -22,6 +24,8 @@ void Hypergraph::buildFromBlock(odb::dbBlock* block)
 {
   clear();
 
+  // Pass 1: number the vertices before any pin is recorded, so pass 2 can
+  // translate an iterm's owning dbInst id to a vertex index immediately.
   for (odb::dbInst* inst : block->getInsts()) {
     const odb::dbId<odb::dbInst> id(inst->getId());
     vertex_index_[id] = num_vertices_;
@@ -29,6 +33,11 @@ void Hypergraph::buildFromBlock(odb::dbBlock* block)
     ++num_vertices_;
   }
 
+  // Pass 2: stream the hyperedge-major CSR directly — nets arrive in
+  // iteration order, so each net's pins land contiguously and the offset
+  // is just the running pin count. One pin per dbITerm; an instance with
+  // several pins on the same net appears once per pin so the pin slice
+  // stays in one-to-one correspondence with dbNet::getITerms().
   hyperedge_offsets_.push_back(0);
   for (odb::dbNet* net : block->getNets()) {
     const odb::dbId<odb::dbNet> id(net->getId());
@@ -42,8 +51,9 @@ void Hypergraph::buildFromBlock(odb::dbBlock* block)
     ++num_hyperedges_;
   }
 
-  // Build the vertex-major CSR by counting degrees, prefix-summing into
-  // offsets, then scattering hyperedge indices.
+  // Pass 3: transpose into the vertex-major CSR with a counting sort
+  // (degree count, prefix sum, scatter) — O(pins) with no per-vertex
+  // temporary lists to allocate.
   vertex_offsets_.assign(num_vertices_ + 1, 0);
   for (const int vertex : pin_list_) {
     ++vertex_offsets_[vertex + 1];
@@ -52,6 +62,8 @@ void Hypergraph::buildFromBlock(odb::dbBlock* block)
     vertex_offsets_[v + 1] += vertex_offsets_[v];
   }
 
+  // cursor[v] tracks the next free slot in vertex v's slice; iterating
+  // edges in order keeps each slice sorted by hyperedge index.
   vertex_pin_list_.assign(pin_list_.size(), 0);
   std::vector<int> cursor(vertex_offsets_.begin(), vertex_offsets_.end() - 1);
   for (int e = 0; e < num_hyperedges_; ++e) {

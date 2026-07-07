@@ -1,9 +1,26 @@
 // eda-lab: hypergraph netlist model (Phase 0, Item 3).
 //
-// Vertices are dbInsts and hyperedges are dbNets, identified by stable
-// OpenDB ids (dbId<T>) that survive database save/load. Topology is held
-// in CSR-style flat arrays and is rebuilt on demand from a dbBlock; there
-// is no incremental sync with the database.
+// Vertices are dbInsts and hyperedges are dbNets. Objects are identified
+// two ways, with different lifetimes:
+//
+//   - dbId<T>: the stable OpenDB id. Survives database save/load and is
+//     never invalidated by a rebuild. Use it to refer to an instance or
+//     net across rebuilds or to get back to the OpenDB object.
+//   - index: a dense [0, n) position assigned in dbSet iteration order at
+//     build time. Only meaningful for the current build; used to address
+//     the flat arrays below and any per-vertex/per-edge side arrays an
+//     engine allocates.
+//
+// Topology is stored CSR-style (compressed sparse row): an offsets array
+// of size n+1 brackets each element's slice of a single flat data array,
+// so element i's data is data[offsets[i] .. offsets[i+1]). Two mirrored
+// CSRs are kept — hyperedge-major (edge -> member vertices) and
+// vertex-major (vertex -> incident edges) — trading memory for cache-
+// friendly traversal in either direction, the access pattern most
+// partitioning/clustering kernels need.
+//
+// The view is rebuilt on demand from a dbBlock; there is no incremental
+// sync with the database (observers can come later if profiling demands).
 
 #pragma once
 
@@ -38,12 +55,14 @@ class Hypergraph
   int numHyperedges() const { return num_hyperedges_; }
   int numPins() const { return static_cast<int>(pin_list_.size()); }
 
-  // Vertex index <-> dbInst id. Out-of-range or unknown lookups return an
-  // invalid dbId (0) / kInvalidIndex rather than failing.
+  // Vertex index <-> dbInst id. vertexId translates a build-local index
+  // to the stable OpenDB id (resolve with dbInst::getInst); vertexIndex
+  // goes the other way. Out-of-range or unknown lookups return an invalid
+  // dbId (0) / kInvalidIndex rather than failing — no exceptions.
   odb::dbId<odb::dbInst> vertexId(int idx) const;
   int vertexIndex(odb::dbId<odb::dbInst> id) const;
 
-  // Hyperedge index <-> dbNet id.
+  // Hyperedge index <-> dbNet id, same semantics as the vertex pair.
   odb::dbId<odb::dbNet> hyperedgeId(int idx) const;
   int hyperedgeIndex(odb::dbId<odb::dbNet> id) const;
 

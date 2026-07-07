@@ -1,0 +1,19 @@
+{
+  "name": "eda-lab",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspace",
+  "mounts": [],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "llvm-vs-code-extensions.vscode-clangd",
+        "ms-python.python"
+      ]
+    }
+  },
+  "postCreateCommand": "git config --global --add safe.directory /workspace"
+}

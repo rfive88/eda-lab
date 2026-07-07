@@ -4,3 +4,4 @@ build-release/
 out.def
 out.odb
 __pycache__/
+.claude/

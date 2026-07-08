@@ -7,7 +7,7 @@ GTest suites for eda-lab.
 ```bash
 cmake -B build              # Debug tree; build-release/ is the Release tree
 cmake --build build
-ctest --test-dir build -R "hypergraph_test|netlistgen_test" --output-on-failure
+ctest --test-dir build -R "hypergraph_test|netlistgen_test|fm_partitioner_test" --output-on-failure
 ```
 
 The `-R` filter matters: a bare `ctest` also picks up the vendored OpenROAD
@@ -21,6 +21,7 @@ The test binaries can also be run directly. Manual runs execute from the
 cd run
 ../build/hypergraph_test
 ../build/netlistgen_test
+../build/fm_partitioner_test
 ```
 
 ## Test files
@@ -35,6 +36,13 @@ cd run
 - `netlistgen_test.cpp` — no data files needed. A hand-built 3-inst/2-net
   netlist asserting exact hypergraph CSR contents, spec conformance on a
   2000-inst synthetic netlist, net-count limiting, and seed determinism.
+- `fm_partitioner_test.cpp` — the Stage 1 partitioning engine
+  (`src/engines/partitioning/`). Random-hypergraph generator determinism
+  and validity; FM determinism, balance, improvement over a
+  topology-blind initial, a known-optimal two-clique case, the weighted
+  objective following the hyperedge `weight` plane, and a run on the
+  Nangate45 gcd design (the only test here that needs
+  `EDA_LAB_DATA_DIR`).
 
 ## Convention
 

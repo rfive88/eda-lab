@@ -25,6 +25,12 @@ add_library(netlistgen src/netlistgen/netlistgen.cpp)
 target_include_directories(netlistgen PUBLIC src)
 target_link_libraries(netlistgen PUBLIC odb utl ord_shim)
 
+add_library(partitioning
+  src/engines/partitioning/random_hypergraph.cpp
+  src/engines/partitioning/fm_partitioner.cpp)
+target_include_directories(partitioning PUBLIC src)
+target_link_libraries(partitioning PUBLIC hypergraph odb utl ord_shim)
+
 enable_testing()
 find_package(GTest REQUIRED)
 
@@ -38,6 +44,14 @@ add_executable(netlistgen_test test/netlistgen_test.cpp)
 target_link_libraries(netlistgen_test PRIVATE netlistgen hypergraph odb utl
                                               GTest::gtest GTest::gtest_main)
 
+add_executable(fm_partitioner_test test/fm_partitioner_test.cpp)
+target_compile_definitions(fm_partitioner_test
+                           PRIVATE EDA_LAB_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
+target_link_libraries(fm_partitioner_test PRIVATE partitioning hypergraph odb
+                                                  utl GTest::gtest
+                                                  GTest::gtest_main)
+
 include(GoogleTest)
 add_test(NAME hypergraph_test COMMAND hypergraph_test)
 add_test(NAME netlistgen_test COMMAND netlistgen_test)
+add_test(NAME fm_partitioner_test COMMAND fm_partitioner_test)

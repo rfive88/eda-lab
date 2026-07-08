@@ -17,6 +17,14 @@ add_library(hypergraph src/hypergraph/hypergraph.cpp)
 target_include_directories(hypergraph PUBLIC src)
 target_link_libraries(hypergraph PUBLIC odb utl)
 
+# Inert definitions of OpenROAD-application globals referenced by utl.a's
+# swig/Tcl wrapper objects; see src/support/ord_shim.cpp.
+add_library(ord_shim src/support/ord_shim.cpp)
+
+add_library(netlistgen src/netlistgen/netlistgen.cpp)
+target_include_directories(netlistgen PUBLIC src)
+target_link_libraries(netlistgen PUBLIC odb utl ord_shim)
+
 enable_testing()
 find_package(GTest REQUIRED)
 
@@ -26,5 +34,10 @@ target_compile_definitions(hypergraph_test
 target_link_libraries(hypergraph_test PRIVATE hypergraph odb utl
                                               GTest::gtest GTest::gtest_main)
 
+add_executable(netlistgen_test test/netlistgen_test.cpp)
+target_link_libraries(netlistgen_test PRIVATE netlistgen hypergraph odb utl
+                                              GTest::gtest GTest::gtest_main)
+
 include(GoogleTest)
 add_test(NAME hypergraph_test COMMAND hypergraph_test)
+add_test(NAME netlistgen_test COMMAND netlistgen_test)

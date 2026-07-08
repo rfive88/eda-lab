@@ -1,6 +1,8 @@
 // Tests for the eda-lab hypergraph netlist model (Phase 0, Item 3).
 
 #include <algorithm>
+#include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -9,6 +11,7 @@
 #include "odb/db.h"
 #include "odb/defin.h"
 #include "odb/lefin.h"
+#include "spdlog/sinks/ostream_sink.h"
 #include "utl/Logger.h"
 
 namespace eda {
@@ -239,6 +242,171 @@ TEST_F(HypergraphTest, TestRoundTripComparison)
   EXPECT_EQ(rebuilt.hyperedgeOffsets(), graph.hyperedgeOffsets());
   EXPECT_EQ(rebuilt.vertexOffsets(), graph.vertexOffsets());
   EXPECT_EQ(rebuilt.vertexPinList(), graph.vertexPinList());
+}
+
+TEST_F(HypergraphTest, PlaneCreateOnDemand)
+{
+  Hypergraph graph;
+  graph.buildFromBlock(block_);
+  const size_t nv = static_cast<size_t>(graph.numVertices());
+  const size_t ne = static_cast<size_t>(graph.numHyperedges());
+
+  EXPECT_FALSE(graph.hasVertexPlane("weight"));
+  EXPECT_FALSE(graph.hasHyperedgePlane("weight"));
+
+  // First access creates the plane at the right size, zero-initialized.
+  std::vector<double>& vd = graph.vertexDoublePlane("weight");
+  EXPECT_TRUE(graph.hasVertexPlane("weight"));
+  ASSERT_EQ(vd.size(), nv);
+  EXPECT_TRUE(std::all_of(
+      vd.begin(), vd.end(), [](const double x) { return x == 0.0; }));
+
+  std::vector<int>& vi = graph.vertexIntPlane("partition");
+  ASSERT_EQ(vi.size(), nv);
+  EXPECT_TRUE(
+      std::all_of(vi.begin(), vi.end(), [](const int x) { return x == 0; }));
+
+  std::vector<bool>& vb = graph.vertexBoolPlane("fixed");
+  ASSERT_EQ(vb.size(), nv);
+  EXPECT_TRUE(std::none_of(vb.begin(), vb.end(), [](const bool x) { return x; }));
+
+  std::vector<double>& ed = graph.hyperedgeDoublePlane("weight");
+  EXPECT_TRUE(graph.hasHyperedgePlane("weight"));
+  ASSERT_EQ(ed.size(), ne);
+  std::vector<int>& ei = graph.hyperedgeIntPlane("cut");
+  ASSERT_EQ(ei.size(), ne);
+  std::vector<bool>& eb = graph.hyperedgeBoolPlane("critical");
+  ASSERT_EQ(eb.size(), ne);
+}
+
+TEST_F(HypergraphTest, PlanePersistence)
+{
+  Hypergraph graph;
+  graph.buildFromBlock(block_);
+
+  std::vector<int>& first = graph.vertexIntPlane("partition");
+  for (int v = 0; v < graph.numVertices(); ++v) {
+    first[v] = v % 3;
+  }
+
+  // A second access must hand back the same storage, values intact.
+  std::vector<int>& second = graph.vertexIntPlane("partition");
+  EXPECT_EQ(&first, &second);
+  for (int v = 0; v < graph.numVertices(); ++v) {
+    EXPECT_EQ(second[v], v % 3);
+  }
+}
+
+TEST_F(HypergraphTest, PlaneTypeConflict)
+{
+  // Capture the diagnostic through a private in-memory sink rather than
+  // asserting on the process's stdout.
+  utl::Logger logger;
+  auto stream = std::make_shared<std::ostringstream>();
+  logger.addSink(std::make_shared<spdlog::sinks::ostream_sink_mt>(*stream));
+
+  Hypergraph graph(&logger);
+  graph.buildFromBlock(block_);
+
+  std::vector<double>& doubles = graph.vertexDoublePlane("weight");
+  doubles[0] = 2.5;
+  EXPECT_TRUE(stream->str().empty());
+
+  // Documented conflict behavior: warning logged, the call returns
+  // separate valid int storage, and the original double plane (and any
+  // reference to it) is untouched.
+  std::vector<int>& ints = graph.vertexIntPlane("weight");
+  EXPECT_NE(stream->str().find("created as double"), std::string::npos);
+  ASSERT_EQ(ints.size(), static_cast<size_t>(graph.numVertices()));
+  EXPECT_EQ(ints[0], 0);
+  EXPECT_EQ(doubles[0], 2.5);
+  ints[0] = 7;
+  EXPECT_EQ(doubles[0], 2.5);
+
+  // The name still resolves to the same double plane for matched access.
+  EXPECT_EQ(&graph.vertexDoublePlane("weight"), &doubles);
+}
+
+TEST_F(HypergraphTest, PlaneRemoval)
+{
+  Hypergraph graph;
+  graph.buildFromBlock(block_);
+
+  graph.vertexBoolPlane("fixed")[0] = true;
+  EXPECT_TRUE(graph.hasVertexPlane("fixed"));
+
+  graph.removeVertexPlane("fixed");
+  EXPECT_FALSE(graph.hasVertexPlane("fixed"));
+
+  // Removing an unknown name is a harmless no-op.
+  graph.removeVertexPlane("no_such_plane");
+  graph.removeHyperedgePlane("no_such_plane");
+
+  // Re-access after removal starts from defaults again.
+  EXPECT_FALSE(graph.vertexBoolPlane("fixed")[0]);
+
+  graph.hyperedgeIntPlane("cut");
+  EXPECT_TRUE(graph.hasHyperedgePlane("cut"));
+  graph.removeHyperedgePlane("cut");
+  EXPECT_FALSE(graph.hasHyperedgePlane("cut"));
+}
+
+TEST_F(HypergraphTest, PlaneRebuildInvalidation)
+{
+  Hypergraph graph;
+  graph.buildFromBlock(block_);
+
+  graph.vertexDoublePlane("weight")[0] = 3.0;
+  graph.hyperedgeIntPlane("cut")[0] = 1;
+
+  // Rebuilding reassigns local indices, so every plane must be gone.
+  graph.buildFromBlock(block_);
+  EXPECT_FALSE(graph.hasVertexPlane("weight"));
+  EXPECT_FALSE(graph.hasHyperedgePlane("cut"));
+  EXPECT_EQ(graph.vertexDoublePlane("weight")[0], 0.0);
+
+  // clearAllPlanes() wipes planes without touching the topology.
+  graph.vertexDoublePlane("weight")[0] = 3.0;
+  graph.clearAllPlanes();
+  EXPECT_FALSE(graph.hasVertexPlane("weight"));
+  EXPECT_EQ(graph.numVertices(), 734);
+
+  // clear() goes through the same choke point.
+  graph.vertexDoublePlane("weight");
+  graph.clear();
+  EXPECT_FALSE(graph.hasVertexPlane("weight"));
+}
+
+TEST_F(HypergraphTest, PlaneIndependence)
+{
+  utl::Logger logger;
+  auto stream = std::make_shared<std::ostringstream>();
+  logger.addSink(std::make_shared<spdlog::sinks::ostream_sink_mt>(*stream));
+
+  Hypergraph graph(&logger);
+  graph.buildFromBlock(block_);
+  ASSERT_NE(graph.numVertices(), graph.numHyperedges());
+
+  // Same name, different element kind: separate planes, no conflict.
+  std::vector<int>& vx = graph.vertexIntPlane("x");
+  std::vector<int>& ex = graph.hyperedgeIntPlane("x");
+  EXPECT_TRUE(stream->str().empty());
+  EXPECT_EQ(vx.size(), static_cast<size_t>(graph.numVertices()));
+  EXPECT_EQ(ex.size(), static_cast<size_t>(graph.numHyperedges()));
+
+  vx[0] = 42;
+  EXPECT_EQ(ex[0], 0);
+
+  // Even the type binding is per-kind: a double hyperedge plane "x" after
+  // an int vertex plane "x" is not a conflict.
+  graph.removeHyperedgePlane("x");
+  graph.hyperedgeDoublePlane("x");
+  EXPECT_TRUE(stream->str().empty());
+
+  // Removal on one side leaves the other side alone.
+  graph.removeVertexPlane("x");
+  EXPECT_FALSE(graph.hasVertexPlane("x"));
+  EXPECT_TRUE(graph.hasHyperedgePlane("x"));
 }
 
 }  // namespace

@@ -55,7 +55,35 @@ Key design points:
 
 Tests (`test/hypergraph_test.cpp`) load Nangate45 + the gcd DEF once per suite
 and cover: empty-block build, id↔index round trips, connectivity checked
-against `dbNet::getITerms()`, and inst/net count parity with `hello_odb`.
+against `dbNet::getITerms()`, inst/net count parity with `hello_odb`, and the
+attribute-plane semantics below.
+
+### Attribute planes
+
+Named per-vertex / per-hyperedge side arrays for engines, parallel to the CSR
+arrays. Fixed type menu — `double`, `int`, `bool` — no templates. API:
+
+- `vertexDoublePlane/vertexIntPlane/vertexBoolPlane(name)` →
+  `std::vector<T>&` sized `numVertices()`; `hyperedge*Plane(name)` mirrors
+  sized `numHyperedges()`. Created on first access, zero-initialized
+  (0.0 / 0 / false).
+- `hasVertexPlane`/`hasHyperedgePlane`, `removeVertexPlane`/
+  `removeHyperedgePlane`, `clearAllPlanes()`.
+- Vertex and hyperedge planes are independent namespaces (same name OK).
+- A name is bound to its first-created type. A different-typed access is a
+  caller bug: it logs a `utl::Logger` warning (UKN-0100; `warn`, not `error`,
+  because `Logger::error()` throws at the pinned SHA and this API never
+  throws) and returns separate valid storage of the requested type — the
+  original plane is untouched. Pass a logger via `Hypergraph(utl::Logger*)`
+  to see the diagnostic.
+
+**Local-index rule:** planes are indexed by the dense local index
+(`vertexIndex()`/`hyperedgeIndex()`), never by `dbId`.
+
+**Rebuild invalidation rule:** planes are valid only for the topology
+snapshot they were created against. `buildFromBlock()` and `clear()` destroy
+every plane (enforced in `clear()`, the choke point both pass through) —
+never cache a plane reference across a rebuild.
 
 ## Programmatic netlist construction (netlistgen)
 

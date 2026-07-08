@@ -3,8 +3,22 @@
 #include "hypergraph/hypergraph.h"
 
 #include "odb/db.h"
+#include "utl/Logger.h"
 
 namespace eda {
+
+const char* Hypergraph::planeTypeName(const PlaneType type)
+{
+  switch (type) {
+    case PlaneType::kDouble:
+      return "double";
+    case PlaneType::kInt:
+      return "int";
+    case PlaneType::kBool:
+      return "bool";
+  }
+  return "?";
+}
 
 void Hypergraph::clear()
 {
@@ -18,6 +32,11 @@ void Hypergraph::clear()
   pin_list_.clear();
   vertex_offsets_.clear();
   vertex_pin_list_.clear();
+
+  // Planes parallel the element counts this function just reset, so they
+  // die here — the one choke point both clear() and buildFromBlock() (via
+  // clear()) pass through, which is what enforces the invalidation rule.
+  clearAllPlanes();
 }
 
 void Hypergraph::buildFromBlock(odb::dbBlock* block)
@@ -99,6 +118,117 @@ int Hypergraph::hyperedgeIndex(const odb::dbId<odb::dbNet> id) const
 {
   const auto it = hyperedge_index_.find(id);
   return it == hyperedge_index_.end() ? kInvalidIndex : it->second;
+}
+
+Hypergraph::Plane& Hypergraph::getOrCreatePlane(PlaneMap& planes,
+                                                const std::string& name,
+                                                const PlaneType requested,
+                                                const char* kind)
+{
+  const auto [it, inserted] = planes.try_emplace(name, Plane{requested});
+  if (!inserted && it->second.type != requested) {
+    // Diagnosed on every mismatched access so the bug stays visible.
+    // warn, not error: Logger::error() at the pinned SHA throws, and
+    // this API guarantees it never will (see hypergraph.h).
+    if (logger_ != nullptr) {
+      logger_->warn(utl::UKN,
+                    100,
+                    "{} attribute plane '{}' was created as {} but accessed "
+                    "as {}; returning separate {} storage",
+                    kind,
+                    name,
+                    planeTypeName(it->second.type),
+                    planeTypeName(requested),
+                    planeTypeName(requested));
+    }
+  }
+  return it->second;
+}
+
+std::vector<double>& Hypergraph::vertexDoublePlane(const std::string& name)
+{
+  Plane& plane
+      = getOrCreatePlane(vertex_planes_, name, PlaneType::kDouble, "vertex");
+  if (!plane.doubles) {
+    plane.doubles.emplace(num_vertices_, 0.0);
+  }
+  return *plane.doubles;
+}
+
+std::vector<int>& Hypergraph::vertexIntPlane(const std::string& name)
+{
+  Plane& plane
+      = getOrCreatePlane(vertex_planes_, name, PlaneType::kInt, "vertex");
+  if (!plane.ints) {
+    plane.ints.emplace(num_vertices_, 0);
+  }
+  return *plane.ints;
+}
+
+std::vector<bool>& Hypergraph::vertexBoolPlane(const std::string& name)
+{
+  Plane& plane
+      = getOrCreatePlane(vertex_planes_, name, PlaneType::kBool, "vertex");
+  if (!plane.bools) {
+    plane.bools.emplace(num_vertices_, false);
+  }
+  return *plane.bools;
+}
+
+std::vector<double>& Hypergraph::hyperedgeDoublePlane(const std::string& name)
+{
+  Plane& plane = getOrCreatePlane(
+      hyperedge_planes_, name, PlaneType::kDouble, "hyperedge");
+  if (!plane.doubles) {
+    plane.doubles.emplace(num_hyperedges_, 0.0);
+  }
+  return *plane.doubles;
+}
+
+std::vector<int>& Hypergraph::hyperedgeIntPlane(const std::string& name)
+{
+  Plane& plane
+      = getOrCreatePlane(hyperedge_planes_, name, PlaneType::kInt, "hyperedge");
+  if (!plane.ints) {
+    plane.ints.emplace(num_hyperedges_, 0);
+  }
+  return *plane.ints;
+}
+
+std::vector<bool>& Hypergraph::hyperedgeBoolPlane(const std::string& name)
+{
+  Plane& plane = getOrCreatePlane(
+      hyperedge_planes_, name, PlaneType::kBool, "hyperedge");
+  if (!plane.bools) {
+    plane.bools.emplace(num_hyperedges_, false);
+  }
+  return *plane.bools;
+}
+
+bool Hypergraph::hasVertexPlane(const std::string& name) const
+{
+  return vertex_planes_.count(name) > 0;
+}
+
+bool Hypergraph::hasHyperedgePlane(const std::string& name) const
+{
+  return hyperedge_planes_.count(name) > 0;
+}
+
+void Hypergraph::removeVertexPlane(const std::string& name)
+{
+  vertex_planes_.erase(name);
+}
+
+void Hypergraph::removeHyperedgePlane(const std::string& name)
+{
+  hyperedge_planes_.erase(name);
+}
+
+void Hypergraph::clearAllPlanes()
+{
+  vertex_planes_.clear();
+  hyperedge_planes_.clear();
 }
 
 }  // namespace eda

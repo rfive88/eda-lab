@@ -14,6 +14,26 @@ cmake --build build
 ctest --test-dir build    # or run build/hypergraph_test directly
 ```
 
+## Documentation Conventions
+
+1. **STANDING CONVENTION: every directory in this repo MUST contain a
+   README.md describing its contents.** This applies to all existing
+   directories and any directory created in the future. Any session that
+   creates a new directory MUST create its README.md in the same session —
+   no exceptions. (Vendored submodule internals under
+   `third_party/openroad/` are upstream's tree and are exempt.)
+
+2. **Engine README requirement:** every engine subdirectory under
+   `src/engines/` documents in its README.md:
+   - What the engine does (algorithm, objective)
+   - Input contract: which hypergraph attribute planes it reads and writes
+   - All control parameters/options, with types and defaults
+   - How to run the engine and its tests
+
+3. **READMEs describe what actually exists** — read the code before writing
+   or updating them. When code in a directory changes materially, its
+   README.md is updated in the same commit.
+
 ## Layout
 
 - `src/dbio/hello_odb.cpp` — LEF/DEF round-trip smoke test against OpenDB.

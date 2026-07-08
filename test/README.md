@@ -12,8 +12,16 @@ ctest --test-dir build -R "hypergraph_test|netlistgen_test" --output-on-failure
 
 The `-R` filter matters: a bare `ctest` also picks up the vendored OpenROAD
 integration tests, which need the never-built `openroad` binary and fail.
-The test binaries can also be run directly (`build/hypergraph_test`,
-`build/netlistgen_test`).
+
+The test binaries can also be run directly. Manual runs execute from the
+`run/` directory so any output files land there instead of the repo root
+(standing convention in `CLAUDE.md`):
+
+```bash
+cd run
+../build/hypergraph_test
+../build/netlistgen_test
+```
 
 ## Test files
 

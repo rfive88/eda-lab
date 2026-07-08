@@ -11,12 +11,16 @@ end to end:
 
 ## Usage
 
+Run from the `run/` directory so `out.odb`/`out.def` land there, not in the
+repo root (standing convention in `CLAUDE.md`):
+
 ```bash
-./build/hello_odb <tech_lef> <cell_lef> <def>
+cd run
+../build/hello_odb <tech_lef> <cell_lef> <def>
 # e.g.
-./build/hello_odb data/nangate45/Nangate45_tech.lef \
-                  data/nangate45/Nangate45_stdcell.lef \
-                  data/gcd_nangate45.def
+../build/hello_odb ../data/nangate45/Nangate45_tech.lef \
+                   ../data/nangate45/Nangate45_stdcell.lef \
+                   ../data/gcd_nangate45.def
 ```
 
 Argument order is tech LEF, cell LEF, DEF — exiting with usage help on any

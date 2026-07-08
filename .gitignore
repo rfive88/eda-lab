@@ -5,3 +5,7 @@ out.def
 out.odb
 __pycache__/
 .claude/
+*.swp
+run/*
+!run/.gitkeep
+!run/README.md

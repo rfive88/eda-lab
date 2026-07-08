@@ -34,6 +34,14 @@ ctest --test-dir build    # or run build/hypergraph_test directly
    or updating them. When code in a directory changes materially, its
    README.md is updated in the same commit.
 
+4. **STANDING CONVENTION — run outputs go in `run/`:** all manual test runs
+   and any command that writes output files (out.def, out.odb, logs, dumps,
+   etc.) execute from the `run/` directory. Never write output files to the
+   repo root or source tree. Future engine CLIs and test binaries that emit
+   files must write under `run/` or a temp path. `ctest` runs from `build/`
+   are fine as-is. `run/` contents are git-ignored (except its README.md and
+   `.gitkeep`).
+
 ## Layout
 
 - `src/dbio/hello_odb.cpp` — LEF/DEF round-trip smoke test against OpenDB.
@@ -44,6 +52,8 @@ ctest --test-dir build    # or run build/hypergraph_test directly
 - `src/engines/` — placeholder for future partitioning/clustering engines.
 - `test/` — GTest suites; `EDA_LAB_DATA_DIR` points at `data/`.
 - `data/` — Nangate45 LEF + `gcd_nangate45.def` test design.
+- `run/` — git-ignored working directory for manual runs and their output
+  files (see convention 4 above).
 
 ## Hypergraph netlist model (Phase 0, Item 3)
 

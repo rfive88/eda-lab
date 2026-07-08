@@ -5,8 +5,14 @@ subdirectory per engine (partitioner, clusterer, ...). Engines communicate
 with each other and with callers through hypergraph attribute planes rather
 than ad-hoc arrays.
 
-The directory is currently empty; the first planned engine is an FM
-(Fiduccia–Mattheyses) partitioner.
+## Engines
+
+- `partitioning/` — Stage 1 of a planned multilevel K-way multi-objective
+  partitioner: flat 2-way Fiduccia–Mattheyses with a weighted cut
+  objective (reads hyperedge double plane `weight` and vertex double
+  plane `area`, both optional), plus a procedural random hypergraph
+  generator for engine testing. See `partitioning/README.md` for the
+  full plane contract and every `FMParams` option.
 
 ## Convention: every engine ships its own README.md
 

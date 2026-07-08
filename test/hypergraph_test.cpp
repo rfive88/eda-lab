@@ -409,5 +409,76 @@ TEST_F(HypergraphTest, PlaneIndependence)
   EXPECT_TRUE(graph.hasHyperedgePlane("x"));
 }
 
+// Procedural construction needs no fixture (that is the point): plain TEST
+// so the LEF/DEF suite setup is not triggered.
+TEST(HypergraphTopologyTest, BuildFromTopology)
+{
+  Hypergraph graph;
+  // 4 vertices, 3 edges; edge 1 repeats vertex 2 (multi-pin membership,
+  // mirroring one-entry-per-dbITerm), edge 2 is a 2-pin edge.
+  graph.buildFromTopology(4, {{0, 1, 2}, {2, 2, 3}, {0, 3}});
+
+  EXPECT_EQ(graph.numVertices(), 4);
+  EXPECT_EQ(graph.numHyperedges(), 3);
+  EXPECT_EQ(graph.numPins(), 8);
+  EXPECT_EQ(graph.hyperedgeOffsets(), (std::vector<int>{0, 3, 6, 8}));
+  EXPECT_EQ(graph.pinList(), (std::vector<int>{0, 1, 2, 2, 2, 3, 0, 3}));
+
+  // Transpose: per-vertex incident-edge slices, sorted, with the repeated
+  // pin of vertex 2 on edge 1 appearing twice.
+  EXPECT_EQ(graph.vertexOffsets(), (std::vector<int>{0, 2, 3, 6, 8}));
+  EXPECT_EQ(graph.vertexPinList(), (std::vector<int>{0, 2, 0, 0, 1, 1, 1, 2}));
+
+  // No dbBlock behind this graph: every dbId lookup fails soft.
+  EXPECT_FALSE(graph.vertexId(0).isValid());
+  EXPECT_FALSE(graph.hyperedgeId(0).isValid());
+  EXPECT_EQ(graph.vertexIndex(odb::dbId<odb::dbInst>(1)),
+            Hypergraph::kInvalidIndex);
+  EXPECT_EQ(graph.hyperedgeIndex(odb::dbId<odb::dbNet>(1)),
+            Hypergraph::kInvalidIndex);
+
+  // Planes size to the procedural counts and die on rebuild as usual.
+  EXPECT_EQ(graph.vertexDoublePlane("area").size(), 4u);
+  EXPECT_EQ(graph.hyperedgeDoublePlane("weight").size(), 3u);
+  graph.buildFromTopology(2, {{0, 1}});
+  EXPECT_FALSE(graph.hasVertexPlane("area"));
+  EXPECT_EQ(graph.numVertices(), 2);
+}
+
+TEST(HypergraphTopologyTest, BuildFromTopologySkipsBadPins)
+{
+  utl::Logger logger;
+  auto stream = std::make_shared<std::ostringstream>();
+  logger.addSink(std::make_shared<spdlog::sinks::ostream_sink_mt>(*stream));
+
+  Hypergraph graph(&logger);
+  graph.buildFromTopology(3, {{0, 5, 2}, {-1, 1}});
+
+  // Bad pins dropped, edges kept, warning emitted.
+  EXPECT_EQ(graph.numHyperedges(), 2);
+  EXPECT_EQ(graph.pinList(), (std::vector<int>{0, 2, 1}));
+  EXPECT_NE(stream->str().find("pin skipped"), std::string::npos);
+}
+
+TEST(HypergraphTopologyTest, ConstDoublePlaneFinders)
+{
+  Hypergraph graph;
+  graph.buildFromTopology(3, {{0, 1}, {1, 2}});
+  const Hypergraph& cgraph = graph;
+
+  // Absent: probe returns nullptr and creates nothing.
+  EXPECT_EQ(cgraph.findHyperedgeDoublePlane("weight"), nullptr);
+  EXPECT_FALSE(graph.hasHyperedgePlane("weight"));
+
+  // Present as double: probe returns the exact same storage.
+  std::vector<double>& weight = graph.hyperedgeDoublePlane("weight");
+  EXPECT_EQ(cgraph.findHyperedgeDoublePlane("weight"), &weight);
+
+  // Bound to a different type: probe says nullptr, no diagnostic games.
+  graph.vertexIntPlane("area");
+  EXPECT_EQ(cgraph.findVertexDoublePlane("area"), nullptr);
+  EXPECT_EQ(cgraph.findVertexDoublePlane("weight"), nullptr);  // vertex side
+}
+
 }  // namespace
 }  // namespace eda

@@ -22,6 +22,14 @@
 // The view is rebuilt on demand from a dbBlock; there is no incremental
 // sync with the database (observers can come later if profiling demands).
 //
+// A hypergraph can also be built from explicit topology with no dbBlock
+// behind it (buildFromTopology) — the mode engine tests and procedural
+// generators use. In that mode there are no OpenDB objects, so the dbId
+// side of the identifier mapping is simply empty: vertexId()/hyperedgeId()
+// return an invalid dbId (0) for every index and vertexIndex()/
+// hyperedgeIndex() return kInvalidIndex for every id. Everything else —
+// CSR arrays, attribute planes, invalidation rules — behaves identically.
+//
 // Attribute planes are the standard side-array mechanism for engines:
 // a named flat std::vector, parallel to the CSR arrays, holding one
 // value per vertex or per hyperedge. Three element types are supported
@@ -68,6 +76,18 @@ class Hypergraph
   // netlist. Vertex/hyperedge indices are assigned in dbSet iteration
   // order and are only meaningful until the next rebuild.
   void buildFromBlock(odb::dbBlock* block);
+
+  // Discard any previous contents and rebuild from explicit topology:
+  // hyperedges[e] lists the member vertex indices of hyperedge e, each in
+  // [0, num_vertices). One CSR pin is recorded per listed entry, so a
+  // repeated vertex within an edge yields multiple pins, mirroring the
+  // one-entry-per-dbITerm rule of buildFromBlock(). There is no dbBlock in
+  // this mode: dbId lookups uniformly fail soft (see the header comment).
+  // Out-of-range vertex entries are skipped with a UKN-0101 warning rather
+  // than failing — no exceptions.
+  void buildFromTopology(int num_vertices,
+                         const std::vector<std::vector<int>>& hyperedges);
+
   void clear();
 
   int numVertices() const { return num_vertices_; }
@@ -123,6 +143,15 @@ class Hypergraph
   std::vector<int>& hyperedgeIntPlane(const std::string& name);
   std::vector<bool>& hyperedgeBoolPlane(const std::string& name);
 
+  // Read-only probes for engines that take the hypergraph const: return
+  // the plane if it exists AND was created as double, else nullptr (also
+  // nullptr on a type mismatch — a probe is not an access, so no UKN-0100
+  // diagnostic and, unlike the accessors above, nothing is created).
+  const std::vector<double>* findVertexDoublePlane(
+      const std::string& name) const;
+  const std::vector<double>* findHyperedgeDoublePlane(
+      const std::string& name) const;
+
   bool hasVertexPlane(const std::string& name) const;
   bool hasHyperedgePlane(const std::string& name) const;
   void removeVertexPlane(const std::string& name);
@@ -157,6 +186,11 @@ class Hypergraph
                           PlaneType requested,
                           const char* kind);
   static const char* planeTypeName(PlaneType type);
+
+  // Pass 3 of both build paths: transpose the hyperedge-major CSR into the
+  // vertex-major one. Requires num_vertices_, hyperedge_offsets_ and
+  // pin_list_ to be final.
+  void buildVertexMajor();
 
   int num_vertices_ = 0;
   int num_hyperedges_ = 0;

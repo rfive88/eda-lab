@@ -2,6 +2,8 @@
 
 #include "hypergraph/hypergraph.h"
 
+#include <algorithm>
+
 #include "odb/db.h"
 #include "utl/Logger.h"
 
@@ -70,9 +72,50 @@ void Hypergraph::buildFromBlock(odb::dbBlock* block)
     ++num_hyperedges_;
   }
 
-  // Pass 3: transpose into the vertex-major CSR with a counting sort
-  // (degree count, prefix sum, scatter) — O(pins) with no per-vertex
-  // temporary lists to allocate.
+  buildVertexMajor();
+}
+
+void Hypergraph::buildFromTopology(
+    const int num_vertices,
+    const std::vector<std::vector<int>>& hyperedges)
+{
+  clear();
+  num_vertices_ = std::max(num_vertices, 0);
+
+  // No dbBlock here, so vertex_ids_/hyperedge_ids_ and the reverse maps
+  // stay empty on purpose — that emptiness is what makes every dbId lookup
+  // fail soft in procedural mode (see vertexId()/hyperedgeId()).
+  hyperedge_offsets_.push_back(0);
+  for (const std::vector<int>& edge : hyperedges) {
+    for (const int v : edge) {
+      if (v < 0 || v >= num_vertices_) {
+        // Fail soft per the no-exceptions contract: drop the pin, keep
+        // the edge, diagnose if a logger is attached.
+        if (logger_ != nullptr) {
+          logger_->warn(utl::UKN,
+                        101,
+                        "buildFromTopology: hyperedge {} lists vertex {} "
+                        "outside [0, {}); pin skipped",
+                        num_hyperedges_,
+                        v,
+                        num_vertices_);
+        }
+        continue;
+      }
+      pin_list_.push_back(v);
+    }
+    hyperedge_offsets_.push_back(static_cast<int>(pin_list_.size()));
+    ++num_hyperedges_;
+  }
+
+  buildVertexMajor();
+}
+
+// Pass 3: transpose into the vertex-major CSR with a counting sort
+// (degree count, prefix sum, scatter) — O(pins) with no per-vertex
+// temporary lists to allocate.
+void Hypergraph::buildVertexMajor()
+{
   vertex_offsets_.assign(num_vertices_ + 1, 0);
   for (const int vertex : pin_list_) {
     ++vertex_offsets_[vertex + 1];
@@ -94,7 +137,10 @@ void Hypergraph::buildFromBlock(odb::dbBlock* block)
 
 odb::dbId<odb::dbInst> Hypergraph::vertexId(const int idx) const
 {
-  if (idx < 0 || idx >= num_vertices_) {
+  // Bounds-check against the id array, not num_vertices_: after
+  // buildFromTopology() the array is empty while num_vertices_ is not,
+  // and every in-range index must still return the invalid id.
+  if (idx < 0 || idx >= static_cast<int>(vertex_ids_.size())) {
     return odb::dbId<odb::dbInst>();
   }
   return vertex_ids_[idx];
@@ -108,7 +154,8 @@ int Hypergraph::vertexIndex(const odb::dbId<odb::dbInst> id) const
 
 odb::dbId<odb::dbNet> Hypergraph::hyperedgeId(const int idx) const
 {
-  if (idx < 0 || idx >= num_hyperedges_) {
+  // Same soft-fail rule as vertexId() for the procedural-build mode.
+  if (idx < 0 || idx >= static_cast<int>(hyperedge_ids_.size())) {
     return odb::dbId<odb::dbNet>();
   }
   return hyperedge_ids_[idx];
@@ -203,6 +250,30 @@ std::vector<bool>& Hypergraph::hyperedgeBoolPlane(const std::string& name)
     plane.bools.emplace(num_hyperedges_, false);
   }
   return *plane.bools;
+}
+
+// The two const finders are probes, not accesses: they never create,
+// never warn, and return nullptr unless the name is bound to double.
+// (A slot whose type is kDouble always has `doubles` engaged — first
+// creation emplaces it in the same accessor call that pins the type.)
+const std::vector<double>* Hypergraph::findVertexDoublePlane(
+    const std::string& name) const
+{
+  const auto it = vertex_planes_.find(name);
+  if (it == vertex_planes_.end() || it->second.type != PlaneType::kDouble) {
+    return nullptr;
+  }
+  return &*it->second.doubles;
+}
+
+const std::vector<double>* Hypergraph::findHyperedgeDoublePlane(
+    const std::string& name) const
+{
+  const auto it = hyperedge_planes_.find(name);
+  if (it == hyperedge_planes_.end() || it->second.type != PlaneType::kDouble) {
+    return nullptr;
+  }
+  return &*it->second.doubles;
 }
 
 bool Hypergraph::hasVertexPlane(const std::string& name) const

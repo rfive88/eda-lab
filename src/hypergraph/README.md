@@ -6,6 +6,12 @@ and one pin is recorded per `dbITerm` (an instance with several pins on a
 net appears once per pin). There is no incremental sync with the database:
 after the netlist changes, call `buildFromBlock()` again.
 
+A hypergraph can also be built without any dbBlock from explicit topology
+(`buildFromTopology(num_vertices, hyperedges)`, where each hyperedge is a
+vector of vertex indices) — used by engine tests and the procedural random
+generator (`src/engines/partitioning/random_hypergraph.h`). See
+"Procedural mode" below.
+
 ## Design
 
 **Two identifier spaces.**
@@ -27,6 +33,25 @@ and vertex-major (`vertexOffsets()`/`vertexPinList()`: vertex → incident
 edges). Memory is doubled to get cache-friendly traversal in both
 directions, the access pattern partitioning/clustering kernels need.
 
+## Procedural mode
+
+`buildFromTopology(int num_vertices, const std::vector<std::vector<int>>&
+hyperedges)` builds the same dual-CSR structure from explicit topology.
+Differences from block mode:
+
+- **No dbIds.** There are no OpenDB objects, so `vertexId()`/
+  `hyperedgeId()` return an invalid `dbId` (0) for every index and
+  `vertexIndex()`/`hyperedgeIndex()` return `kInvalidIndex` for every id.
+- **Pin multiplicity is caller-controlled.** One CSR pin per listed entry;
+  a vertex repeated inside an edge yields multiple pins, mirroring the
+  one-entry-per-`dbITerm` rule of block mode.
+- **Out-of-range entries fail soft.** A vertex index outside
+  `[0, num_vertices)` is dropped (the edge is kept) with a UKN-0101
+  warning if a logger is attached — no exceptions, as everywhere else.
+
+CSR arrays, attribute planes, and the invalidation rules are identical in
+both modes (`buildFromTopology` also destroys all planes via `clear()`).
+
 ## Attribute planes
 
 Named side arrays for engines — one value per vertex or per hyperedge,
@@ -39,6 +64,11 @@ parallel to the CSR arrays. The element type menu is fixed (`double`,
   sized `numHyperedges()`.
 - `hasVertexPlane` / `hasHyperedgePlane`, `removeVertexPlane` /
   `removeHyperedgePlane`, `clearAllPlanes()`.
+- `findVertexDoublePlane(name)` / `findHyperedgeDoublePlane(name)` —
+  `const` probes for engines that take the hypergraph read-only: return
+  the plane if it exists and was created as `double`, else `nullptr`
+  (including on a type mismatch). A probe never creates a plane and never
+  warns.
 
 Semantics:
 

@@ -19,4 +19,5 @@ available even if the submodule layout changes.
 
 Keep DEFs here small. The test suites parse LEF/DEF at fixture setup, and
 the whole test loop should stay in the seconds range — put large synthetic
-netlists through `src/netlistgen/` instead, which needs no data files.
+netlists through `src/engines/netlistgen/` instead, which needs no data
+files.

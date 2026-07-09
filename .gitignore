@@ -1,3 +1,4 @@
+tmp/
 .cache/
 build/
 build-release/
@@ -6,6 +7,7 @@ out.odb
 __pycache__/
 .claude/
 *.swp
+.DS_Store
 run/*
 !run/.gitkeep
 !run/README.md

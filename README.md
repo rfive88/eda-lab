@@ -8,10 +8,10 @@ Current pieces:
 
 - a rebuildable hypergraph view of a `dbBlock` netlist, with attribute
   planes for engine data (`src/hypergraph/`),
-- programmatic synthetic-netlist construction, no LEF/DEF needed
-  (`src/netlistgen/`),
 - a LEF/DEF round-trip smoke test (`src/dbio/`),
-- a home for future partitioning/clustering engines (`src/engines/`).
+- algorithm engines under `src/engines/`: synthetic-netlist construction
+  (no LEF/DEF needed, `src/engines/netlistgen/`), a K-way FM partitioner
+  (`src/engines/partitioning/`), and a home for future clustering engines.
 
 ## Build & test
 

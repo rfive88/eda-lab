@@ -1,12 +1,21 @@
 # src/engines/
 
-Algorithm engines that operate on the `eda::Hypergraph` model — one
-subdirectory per engine (partitioner, clusterer, ...). Engines communicate
-with each other and with callers through hypergraph attribute planes rather
-than ad-hoc arrays.
+Algorithm engines built around the `eda::Hypergraph` model — one
+subdirectory per engine (generator, partitioner, clusterer, ...). Transform
+engines communicate with each other and with callers through hypergraph
+attribute planes rather than ad-hoc arrays; source engines instead produce
+the `dbBlock` a hypergraph is built from.
 
 ## Engines
 
+- `netlistgen/` — synthetic netlist generation (source engine). Builds
+  `dbBlock`s of controlled topology through the OpenDB API only (no
+  LEF/DEF), to feed `Hypergraph::buildFromBlock()` in tests and benchmarks.
+  Reads/writes no attribute planes. Currently in a staged promotion from
+  test utility to full engine (Stage A of 5: directory move + library
+  target + IoType-based pin refactor; LEF-backed masters, statistical cell
+  mix, loop avoidance, and DEF/`.odb`/Verilog writers land in later
+  stages). See `netlistgen/README.md` and `netlistgen/FLOW.md`.
 - `partitioning/` — Stage 1 of a planned multilevel K-way multi-objective
   partitioner: flat 2-way Fiduccia–Mattheyses with a weighted cut
   objective (reads hyperedge double plane `weight` and vertex double

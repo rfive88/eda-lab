@@ -45,8 +45,8 @@ ctest --test-dir build    # or run build/hypergraph_test directly
 ## Flow Diagrams (FLOW.md)
 
 1. **STANDING CONVENTION:** every engine directory and every non-trivial
-   multi-file component directory (e.g. `src/hypergraph`, `src/netlistgen`,
-   `src/engines/*`) carries a single FLOW.md.
+   multi-file component directory (e.g. `src/hypergraph`, `src/engines/*`)
+   carries a single FLOW.md.
 
 2. **FLOW.md contains Mermaid diagrams showing the algorithmic/logical flow
    of the code** — what it does and why — not merely call structure.
@@ -89,9 +89,10 @@ ctest --test-dir build    # or run build/hypergraph_test directly
 
 - `src/dbio/hello_odb.cpp` — LEF/DEF round-trip smoke test against OpenDB.
 - `src/hypergraph/` — hypergraph netlist model (see below).
-- `src/netlistgen/` — programmatic netlist construction, no LEF/DEF (see below).
 - `src/support/ord_shim.cpp` — inert `ord::getLogger`/`ord::OpenRoad::openRoad`
   definitions so links survive when utl.a's Tcl-wrapper objects get pulled in.
+- `src/engines/netlistgen/` — programmatic netlist construction, no LEF/DEF
+  (see below).
 - `src/engines/partitioning/` — Stage 1 partitioning engine (see below).
 - `test/` — GTest suites; `EDA_LAB_DATA_DIR` points at `data/`.
 - `data/` — Nangate45 LEF + `gcd_nangate45.def` test design.
@@ -166,10 +167,14 @@ never cache a plane reference across a rebuild.
 
 ## Programmatic netlist construction (netlistgen)
 
-`src/netlistgen/netlistgen.h` builds `dbBlock`s through OpenDB API calls
-only — no LEF/DEF — so tests and benchmarks can create netlists of any size
-with exactly known or statistically controlled topology, then feed them to
-`Hypergraph::buildFromBlock()`. Two layers:
+`src/engines/netlistgen/netlistgen.h` builds `dbBlock`s through OpenDB API
+calls only — no LEF/DEF — so tests and benchmarks can create netlists of any
+size with exactly known or statistically controlled topology, then feed them
+to `Hypergraph::buildFromBlock()`. It is being promoted from a Stage 1/2 test
+utility into a full engine (Stage A of 5 relocated it here and made pin
+access IoType-based; LEF-backed masters, statistical cell mix, loop
+avoidance, and DEF/`.odb`/Verilog writers land in later stages — see
+`src/engines/netlistgen/README.md`). Two layers:
 
 - **`NetlistBuilder`** owns a fresh `dbDatabase` (tech, lib, chip, top block)
   and wraps master/inst/net creation and pin connection. It handles OpenDB's

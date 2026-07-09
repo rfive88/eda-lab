@@ -7,7 +7,7 @@ GTest suites for eda-lab.
 ```bash
 cmake -B build              # Debug tree; build-release/ is the Release tree
 cmake --build build
-ctest --test-dir build -R "hypergraph_test|netlistgen_test|fm_partitioner_test" --output-on-failure
+ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_link_smoke|fm_partitioner_test" --output-on-failure
 ```
 
 The `-R` filter matters: a bare `ctest` also picks up the vendored OpenROAD
@@ -48,12 +48,19 @@ cd run
     bad-pin skipping with a logged warning, and the const
     `findVertexDoublePlane`/`findHyperedgeDoublePlane` probes (nullptr on
     absent or wrong-typed planes, never create).
-- `netlistgen_test.cpp` — programmatic netlist construction
-  (`src/netlistgen/`), no data files needed. A hand-built 3-inst/2-net
+- `netlistgen_test.cpp` — the synthetic netlist generation engine
+  (`src/engines/netlistgen/`, relocated from `src/netlistgen/` in Stage A
+  of its engine promotion), no data files needed. A hand-built 3-inst/2-net
   netlist asserting exact hypergraph CSR contents in both directions
   (`NetlistBuilderTest.ExactTopology`), and `generateSynthetic` conformance
   on a 2000-inst netlist (fanout bounds, one driver per net, no pin reuse),
   net-count limiting, and seed determinism (`SyntheticNetlistTest`).
+- `netlistgen_link_smoke.cpp` — library-linkage guard for the same engine,
+  no data files needed. A plain `main()` (no GTest) that links the
+  `netlistgen` library as an external consumer would
+  (`target_link_libraries(... PRIVATE netlistgen odb utl)`, sources not
+  compiled in) and calls `generateSynthetic`; returns non-zero on failure.
+  Fails to link if `netlistgen` ever stops being a real library target.
 - `fm_partitioner_test.cpp` — the Stage 1–2 partitioning engine
   (`src/engines/partitioning/`): flat K-way FM minimizing weighted
   connectivity-1. Reported costs are cross-checked against independent
@@ -93,8 +100,8 @@ cd run
 
 - Real ODB data (`data/nangate45/` LEF + `data/gcd_nangate45.def`):
   `HypergraphTest` and `FMOdbTest` fixtures only.
-- Programmatic dbBlocks via `src/netlistgen/` (OpenDB API, no LEF/DEF):
-  all of `netlistgen_test.cpp`.
+- Programmatic dbBlocks via `src/engines/netlistgen/` (OpenDB API, no
+  LEF/DEF): `netlistgen_test.cpp` and `netlistgen_link_smoke.cpp`.
 - dbBlock-free hypergraphs via `buildFromTopology` /
   `generateRandomHypergraph`: `HypergraphTopologyTest`,
   `RandomHypergraphTest`, `FMPartitionerTest`.

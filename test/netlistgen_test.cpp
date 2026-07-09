@@ -5,7 +5,7 @@
 
 #include "gtest/gtest.h"
 #include "hypergraph/hypergraph.h"
-#include "netlistgen/netlistgen.h"
+#include "engines/netlistgen/netlistgen.h"
 #include "odb/db.h"
 
 namespace eda {

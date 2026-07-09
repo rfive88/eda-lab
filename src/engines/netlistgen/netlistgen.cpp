@@ -1,6 +1,6 @@
 // See netlistgen.h for the construction protocol and generator model.
 
-#include "netlistgen/netlistgen.h"
+#include "engines/netlistgen/netlistgen.h"
 
 #include <algorithm>
 #include <random>
@@ -104,10 +104,23 @@ int generateSynthetic(NetlistBuilder& builder,
   std::vector<odb::dbITerm*> sinks;
   for (odb::dbInst* inst : insts) {
     for (odb::dbITerm* iterm : inst->getITerms()) {
-      if (iterm->getIoType() == odb::dbIoType::OUTPUT) {
-        drivers.push_back(iterm);
-      } else {
-        sinks.push_back(iterm);
+      // Classify each terminal by its dbMTerm IoType, never by pin name or
+      // position, so this loop works unchanged for LEF-backed masters with
+      // arbitrary pin names/ordering (Stage B). A driver is any OUTPUT
+      // terminal; INPUT and INOUT terminals are sink-capable. FEEDTHRU is
+      // ignored — it drives no logic. Synthetic masters emit only INPUT and
+      // OUTPUT, so the driver/sink pools here are identical to name-based
+      // classification (regression-safety gate).
+      switch (iterm->getIoType().getValue()) {
+        case odb::dbIoType::OUTPUT:
+          drivers.push_back(iterm);
+          break;
+        case odb::dbIoType::INPUT:
+        case odb::dbIoType::INOUT:
+          sinks.push_back(iterm);
+          break;
+        case odb::dbIoType::FEEDTHRU:
+          break;
       }
     }
   }

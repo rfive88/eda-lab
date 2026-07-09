@@ -134,4 +134,11 @@ determinism, balance, and reported-cost consistency for K ∈ {3, 4};
 improvement over a striped initial; recovery from a provided initial
 with empty parts; fallback on out-of-range provided values; K = 2
 spanning-cut equivalence; the trivial K = 1 case; and K = 4 on the gcd
-design.
+design. Plane and reporting honesty: balance following the vertex `area`
+plane in a case where count-balance and area-balance disagree (only the
+5+1 vs 6×1 area split is feasible); `balanced == false` reported when no
+feasible partition exists (one vertex heavier than the per-part upper
+bound); and golden cut-cost quality floors on fixed-seed random
+hypergraphs for K ∈ {2, 4}, backed by an `expectInvariants` helper that
+recomputes cost and area-weighted feasibility from scratch and checks
+them against the reported `FMResult`.

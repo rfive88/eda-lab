@@ -58,7 +58,10 @@ cd run
   (`src/engines/partitioning/`): flat K-way FM minimizing weighted
   connectivity-1. Reported costs are cross-checked against independent
   reference evaluators defined in the test (`computeCut`,
-  `computeConnectivityCost`). Three groups:
+  `computeConnectivityCost`), and an `expectInvariants` helper recomputes
+  from scratch, for any `FMResult`, the cost and the `area`-plane-weighted
+  balance feasibility and checks both against what the engine reported.
+  Three groups:
   - `RandomHypergraphTest` — `generateRandomHypergraph` determinism and
     validity (degree bounds, in-range pins, no duplicate pins per edge).
   - `FMPartitionerTest` — dbBlock-free hypergraphs only. Stage 1 (2-way):
@@ -72,7 +75,15 @@ cd run
     improvement over a striped initial, recovery from an initial with empty
     parts, fallback to random when a provided initial has out-of-range
     values, K=2 matching the spanning cut (and the Stage 1 path) exactly,
-    and K=1 as the trivial zero-cost case.
+    and K=1 as the trivial zero-cost case. Plane / honesty coverage:
+    balance following the vertex `area` plane where count-balance and
+    area-balance disagree (only a 5+1 vs 6×1 area split is feasible, so
+    an engine ignoring the plane fails), `balanced == false` reported
+    when no feasible partition exists (one vertex outweighs the upper
+    bound), and golden cut-cost quality floors on fixed-seed random
+    hypergraphs for K∈{2,4} (`GoldenCostRegression`; a silent quality
+    regression fails, matching or improving passes — update a golden
+    only for an intentional quality trade-off).
   - `FMOdbTest` (fixture) — the only cases here needing `EDA_LAB_DATA_DIR`:
     Nangate45 + gcd DEF loaded once per suite, then 2-way and 4-way runs
     checking balance, reported-cost consistency, determinism, and strict

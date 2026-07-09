@@ -81,6 +81,39 @@ void expectBalanced(const std::vector<int>& part,
   }
 }
 
+// From-scratch invariant check for any FMResult, independent of the
+// engine's incremental bookkeeping: one part per vertex in [0, k)
+// (enforced inside computeConnectivityCost), reported cost equal to the
+// reference evaluation, and the reported `balanced` flag agreeing with
+// the balance constraint recomputed from the "area" plane (1.0 default)
+// against the engine's [(1 - tol) W/k, (1 + tol) W/k] bounds.
+void expectInvariants(const Hypergraph& hg,
+                      const FMResult& result,
+                      const int k,
+                      const double tol)
+{
+  ASSERT_EQ(result.partition.size(), static_cast<size_t>(hg.numVertices()));
+  EXPECT_DOUBLE_EQ(result.cut_cost,
+                   computeConnectivityCost(hg, result.partition, k));
+
+  const std::vector<double>* area = hg.findVertexDoublePlane("area");
+  std::vector<double> part_weight(k, 0.0);
+  double total = 0.0;
+  for (int v = 0; v < hg.numVertices(); ++v) {
+    const double w = area != nullptr ? (*area)[v] : 1.0;
+    part_weight[result.partition[v]] += w;
+    total += w;
+  }
+  const double lo = (1.0 - tol) * total / k;
+  const double hi = (1.0 + tol) * total / k;
+  bool feasible = true;
+  for (int p = 0; p < k; ++p) {
+    feasible = feasible && part_weight[p] >= lo - 1e-9
+               && part_weight[p] <= hi + 1e-9;
+  }
+  EXPECT_EQ(result.balanced, feasible);
+}
+
 RandomHypergraphParams typicalParams(const unsigned seed)
 {
   RandomHypergraphParams params;
@@ -455,6 +488,131 @@ TEST(FMPartitionerTest, SinglePartIsTrivial)
   EXPECT_TRUE(std::all_of(result.partition.begin(),
                           result.partition.end(),
                           [](const int p) { return p == 0; }));
+}
+
+// Balance follows the vertex "area" plane, not the vertex count. Vertex 0
+// has area 5, the seven others area 1: W = 12, W/2 = 6, tolerance 0.10
+// gives bounds [5.4, 6.6], so the ONLY feasible bisections put vertex 0
+// with exactly one unit companion (5 + 1 = 6 vs 6). Any count-balanced
+// 4/4 split has area 8/4 and is infeasible — an engine that ignored the
+// area plane would happily return one and still claim balanced.
+TEST(FMPartitionerTest, AreaWeightedBalance)
+{
+  // Edges: {0,1}, {0,2}, and the 15-edge clique on {2..7}. With
+  // companion 1 the cut is just {0,2} (cost 1); any other companion cuts
+  // five clique edges as well.
+  std::vector<std::vector<int>> edges = {{0, 1}, {0, 2}};
+  for (int i = 2; i < 8; ++i) {
+    for (int j = i + 1; j < 8; ++j) {
+      edges.push_back({i, j});
+    }
+  }
+
+  FMParams params;
+  params.balance_tolerance = 0.10;
+
+  {
+    // Provided area-balanced optimum: FM must keep it feasible and
+    // cannot leave the cut-1 solution.
+    Hypergraph hg;
+    hg.buildFromTopology(8, edges);
+    std::vector<double>& area = hg.vertexDoublePlane("area");
+    area.assign(8, 1.0);
+    area[0] = 5.0;
+
+    FMParams provided = params;
+    provided.initial = FMParams::InitialPartition::kProvided;
+    const std::vector<int> initial = {0, 0, 1, 1, 1, 1, 1, 1};
+    const FMResult result = partitionFM(hg, provided, &initial);
+
+    EXPECT_TRUE(result.balanced);
+    expectInvariants(hg, result, 2, provided.balance_tolerance);
+    EXPECT_DOUBLE_EQ(result.cut_cost, 1.0);
+    EXPECT_EQ(result.partition[1], result.partition[0]);
+  }
+  {
+    // Random initial: wherever FM lands, a balanced claim implies the
+    // area math held — vertex 0's part must contain exactly 2 vertices.
+    Hypergraph hg;
+    hg.buildFromTopology(8, edges);
+    std::vector<double>& area = hg.vertexDoublePlane("area");
+    area.assign(8, 1.0);
+    area[0] = 5.0;
+
+    const FMResult result = partitionFM(hg, params);
+    EXPECT_TRUE(result.balanced);
+    expectInvariants(hg, result, 2, params.balance_tolerance);
+    const int side0 = result.partition[0];
+    const int in_side0 = static_cast<int>(std::count(
+        result.partition.begin(), result.partition.end(), side0));
+    EXPECT_EQ(in_side0, 2);
+  }
+}
+
+// When no feasible partition exists at all, the engine must say so:
+// balanced == false, honestly reported cost, normal termination. Vertex 0
+// alone outweighs the upper bound (area 10 vs max part 1.1 * 13/2 =
+// 7.15), so every bisection is infeasible.
+TEST(FMPartitionerTest, InfeasibleToleranceReportsUnbalanced)
+{
+  Hypergraph hg;
+  hg.buildFromTopology(4, {{0, 1}, {1, 2}, {2, 3}});
+  std::vector<double>& area = hg.vertexDoublePlane("area");
+  area.assign(4, 1.0);
+  area[0] = 10.0;
+
+  FMParams params;
+  params.balance_tolerance = 0.10;
+  const FMResult result = partitionFM(hg, params);
+
+  EXPECT_FALSE(result.balanced);
+  expectInvariants(hg, result, 2, params.balance_tolerance);
+  EXPECT_LE(result.passes_run, params.max_passes);
+
+  // Same verdict from an unbalanced provided initial: recovery mode has
+  // nowhere feasible to walk to and must not misreport success.
+  FMParams provided = params;
+  provided.initial = FMParams::InitialPartition::kProvided;
+  const std::vector<int> initial = {0, 1, 1, 1};
+  const FMResult from_provided = partitionFM(hg, provided, &initial);
+  EXPECT_FALSE(from_provided.balanced);
+  expectInvariants(hg, from_provided, 2, provided.balance_tolerance);
+}
+
+// Quality floor on fixed-seed random hypergraphs. The golden values are
+// the costs the current engine produces (it is deterministic, see
+// FMDeterminism); an algorithm change that matches or improves quality
+// still passes, while a change that silently degrades the result —
+// e.g. a refinement stage that stops refining — fails. Update a golden
+// only for a change that intentionally trades quality away.
+TEST(FMPartitionerTest, GoldenCostRegression)
+{
+  struct GoldenCase
+  {
+    unsigned graph_seed;
+    int k;
+    double golden;
+  };
+  const std::vector<GoldenCase> cases = {
+      {7, 2, 163.0},
+      {21, 2, 155.0},
+      {7, 4, 326.0},
+      {21, 4, 301.0},
+  };
+
+  for (const GoldenCase& c : cases) {
+    const Hypergraph hg = generateRandomHypergraph(typicalParams(c.graph_seed));
+    FMParams params;
+    params.num_parts = c.k;
+    const FMResult result = partitionFM(hg, params);
+
+    EXPECT_TRUE(result.balanced)
+        << "graph seed " << c.graph_seed << " k " << c.k;
+    expectInvariants(hg, result, c.k, params.balance_tolerance);
+    EXPECT_LE(result.cut_cost, c.golden + 1e-9)
+        << "quality regression: graph seed " << c.graph_seed << " k " << c.k
+        << " golden " << c.golden;
+  }
 }
 
 // Real data: Nangate45 + the gcd DEF, loaded once for the suite exactly

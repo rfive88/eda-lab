@@ -13,6 +13,8 @@ Reference papers (hMETIS, TritonPart, FM 1982) are cataloged in
 `docs/README.md`; the PDFs themselves are gitignored — fetch them per the
 instructions there.
 
+See FLOW.md for algorithmic flow diagrams.
+
 ## What the engine does
 
 `partitionFM()` (`fm_partitioner.h`) splits the vertices of an

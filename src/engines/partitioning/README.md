@@ -9,6 +9,10 @@ CLI/Python/GUI wrappers are future stages; the pure-library API here
 (const hypergraph in, plain result struct out, no I/O, no exceptions) is
 shaped so those can layer on top without changes.
 
+Reference papers (hMETIS, TritonPart, FM 1982) are cataloged in
+`docs/README.md`; the PDFs themselves are gitignored — fetch them per the
+instructions there.
+
 ## What the engine does
 
 `partitionFM()` (`fm_partitioner.h`) splits the vertices of an

@@ -1,0 +1,12 @@
+# clangd config for eda-lab. The compilation database lives in the Debug
+# tree (CMAKE_EXPORT_COMPILE_COMMANDS is ON in CMakeLists.txt).
+CompilationDatabase: build
+
+---
+# Don't background-index the vendored OpenROAD submodule — it dominates
+# compile_commands.json and indexing it costs minutes of CPU and ~GBs of
+# RAM. Files there are still parsed on demand when opened/navigated into.
+If:
+  PathMatch: third_party/.*
+Index:
+  Background: Skip

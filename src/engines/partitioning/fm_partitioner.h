@@ -1,11 +1,17 @@
-// eda-lab: flat 2-way Fiduccia–Mattheyses partitioner (Stage 1).
+// eda-lab: flat K-way Fiduccia–Mattheyses partitioner (Stages 1–2).
 //
-// Minimizes the weighted cut — the sum of weights of hyperedges with pins
-// in both parts — subject to a vertex-weight balance constraint. This is
-// the flat, 2-way stage of a planned multilevel K-way multi-objective
-// partitioner; the API deliberately returns a plain result struct so later
-// stages (and CLI/Python/GUI wrappers) can layer on top without changes
-// here.
+// Minimizes the connectivity-1 objective — for each hyperedge e with
+// lambda(e) = number of distinct parts holding at least one pin of e,
+//
+//   cut_cost = sum over e of weight(e) * (lambda(e) - 1)
+//
+// subject to a vertex-weight balance constraint on every part. For
+// num_parts == 2, lambda is 1 or 2 and this is exactly the Stage 1
+// weighted cut (sum of weights of hyperedges with pins in both parts);
+// the K = 2 path reproduces Stage 1 results. This is the flat stage of a
+// planned multilevel K-way multi-objective partitioner; the API
+// deliberately returns a plain result struct so later stages (and
+// CLI/Python/GUI wrappers) can layer on top without changes here.
 //
 // Plane contract (all optional, read-only):
 //   - hyperedge double plane "weight": cut cost per hyperedge (default 1.0)
@@ -29,11 +35,15 @@ class Hypergraph;
 
 struct FMParams
 {
-  // Maximum fractional deviation of either part's vertex weight from a
-  // perfect 50/50 split: part weight must stay within
-  // [(1 - t) * W/2, (1 + t) * W/2] where W is the total vertex weight.
+  // Number of parts K. Values below 1 are clamped to 1 (K = 1 is the
+  // trivial single-part solution: everything in part 0, cost 0).
+  int num_parts = 2;
+
+  // Maximum fractional deviation of any part's vertex weight from a
+  // perfect W/K split: every part weight must stay within
+  // [(1 - t) * W/K, (1 + t) * W/K] where W is the total vertex weight.
   // Must comfortably exceed the largest single vertex weight's share of
-  // W/2, or no single move is ever feasible and FM cannot leave the
+  // W/K, or no single move is ever feasible and FM cannot leave the
   // initial partition.
   double balance_tolerance = 0.10;
 
@@ -56,8 +66,8 @@ struct FMParams
 
 struct FMResult
 {
-  std::vector<int> partition;  // local vertex index -> 0 or 1
-  double cut_cost = 0.0;       // final weighted cut
+  std::vector<int> partition;  // local vertex index -> part in [0, K)
+  double cut_cost = 0.0;       // final connectivity-1 cost (see header)
   int passes_run = 0;
   bool balanced = false;  // final solution met the balance constraint
 };
@@ -67,11 +77,12 @@ struct FMResult
 // stable vertex order; IEEE-754 arithmetic assumed across platforms).
 //
 // initial_partition is consulted only when params.initial == kProvided; it
-// must have numVertices() entries, each 0 or 1. An unusable provided
-// partition (null / wrong size / other values) falls back to the seeded
-// random initial with a warning — no exceptions. A provided partition may
-// violate the balance constraint; FM then accepts only imbalance-reducing
-// moves until the constraint is met (see fm_partitioner.cpp).
+// must have numVertices() entries, each in [0, num_parts). An unusable
+// provided partition (null / wrong size / other values) falls back to the
+// seeded random initial with a warning — no exceptions. A provided
+// partition may violate the balance constraint (including leaving parts
+// empty); FM then accepts only infeasibility-reducing moves until the
+// constraint is met (see fm_partitioner.cpp).
 FMResult partitionFM(const Hypergraph& hg,
                      const FMParams& params,
                      const std::vector<int>* initial_partition = nullptr);

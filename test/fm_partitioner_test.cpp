@@ -1,7 +1,8 @@
-// Tests for the Stage 1 partitioning engine: the procedural random
-// hypergraph generator and the flat 2-way FM partitioner. Only the final
-// FMOnOdbDesign test touches LEF/DEF data; everything else runs on
-// dbBlock-free hypergraphs (that being the point of buildFromTopology).
+// Tests for the partitioning engine: the procedural random hypergraph
+// generator and the flat K-way FM partitioner (Stage 1 = 2-way spanning
+// cut, Stage 2 = K-way connectivity-1). Only the FMOdbTest cases touch
+// LEF/DEF data; everything else runs on dbBlock-free hypergraphs (that
+// being the point of buildFromTopology).
 
 #include <algorithm>
 #include <set>
@@ -40,16 +41,44 @@ double computeCut(const Hypergraph& hg, const std::vector<int>& part)
   return cut;
 }
 
-// Unit-weight balance check: both sides within (1 +- tol) * n/2 vertices.
-void expectBalanced(const std::vector<int>& part, const double tol)
+// Reference connectivity-1 evaluation: sum over hyperedges of
+// weight * (lambda - 1), lambda = number of distinct parts touched.
+// For k == 2 this must agree with computeCut above.
+double computeConnectivityCost(const Hypergraph& hg,
+                               const std::vector<int>& part,
+                               const int k)
 {
-  const double half = part.size() / 2.0;
-  const int side0 = static_cast<int>(std::count(part.begin(), part.end(), 0));
-  const int side1 = static_cast<int>(part.size()) - side0;
-  EXPECT_GE(side0, (1.0 - tol) * half - 1e-9);
-  EXPECT_LE(side0, (1.0 + tol) * half + 1e-9);
-  EXPECT_GE(side1, (1.0 - tol) * half - 1e-9);
-  EXPECT_LE(side1, (1.0 + tol) * half + 1e-9);
+  const std::vector<double>* weight = hg.findHyperedgeDoublePlane("weight");
+  const std::vector<int>& eoff = hg.hyperedgeOffsets();
+  const std::vector<int>& pins = hg.pinList();
+  double cost = 0.0;
+  for (int e = 0; e < hg.numHyperedges(); ++e) {
+    std::set<int> parts;
+    for (int p = eoff[e]; p < eoff[e + 1]; ++p) {
+      parts.insert(part[pins[p]]);
+    }
+    if (parts.size() > 1) {
+      cost += (weight != nullptr ? (*weight)[e] : 1.0)
+              * (static_cast<int>(parts.size()) - 1);
+    }
+  }
+  EXPECT_TRUE(std::all_of(part.begin(), part.end(), [k](const int p) {
+    return p >= 0 && p < k;
+  }));
+  return cost;
+}
+
+// Unit-weight balance check: every part within (1 +- tol) * n/k vertices.
+void expectBalanced(const std::vector<int>& part,
+                    const double tol,
+                    const int k = 2)
+{
+  const double share = part.size() / static_cast<double>(k);
+  for (int p = 0; p < k; ++p) {
+    const int size = static_cast<int>(std::count(part.begin(), part.end(), p));
+    EXPECT_GE(size, (1.0 - tol) * share - 1e-9) << "part " << p;
+    EXPECT_LE(size, (1.0 + tol) * share + 1e-9) << "part " << p;
+  }
 }
 
 RandomHypergraphParams typicalParams(const unsigned seed)
@@ -251,6 +280,183 @@ TEST(FMPartitionerTest, FMWeightedCut)
   }
 }
 
+// The objective really is connectivity-1, not spanning cut: one triangle
+// hyperedge with each vertex pinned (by a tight balance tolerance) to its
+// own part costs 2 * weight. A spanning-cut objective would report
+// 1 * weight.
+TEST(FMPartitionerTest, KWayLambdaMinusOneObjective)
+{
+  Hypergraph hg;
+  hg.buildFromTopology(3, {{0, 1, 2}});
+
+  FMParams params;
+  params.num_parts = 3;
+  params.balance_tolerance = 0.10;  // every part must hold exactly 1 vertex
+  params.initial = FMParams::InitialPartition::kProvided;
+  const std::vector<int> initial = {0, 1, 2};
+
+  const FMResult result = partitionFM(hg, params, &initial);
+  EXPECT_EQ(result.partition, initial);  // no feasible move exists
+  EXPECT_TRUE(result.balanced);
+  EXPECT_DOUBLE_EQ(result.cut_cost, 2.0);
+
+  // Same with a weighted edge: cost scales as weight * (lambda - 1).
+  Hypergraph whg;
+  whg.buildFromTopology(3, {{0, 1, 2}});
+  whg.hyperedgeDoublePlane("weight")[0] = 2.5;
+  const FMResult weighted = partitionFM(whg, params, &initial);
+  EXPECT_DOUBLE_EQ(weighted.cut_cost, 5.0);
+}
+
+// Three 4-cliques joined by two bridges: the unique optimal balanced
+// 3-way split gives each clique its own part and cuts only the two
+// bridges (lambda 2 each, cost 2). Splitting any clique cuts >= 3 of its
+// internal edges instead.
+TEST(FMPartitionerTest, KWayKnownOptimal)
+{
+  std::vector<std::vector<int>> edges;
+  for (const int base : {0, 4, 8}) {
+    for (int i = 0; i < 4; ++i) {
+      for (int j = i + 1; j < 4; ++j) {
+        edges.push_back({base + i, base + j});
+      }
+    }
+  }
+  edges.push_back({3, 4});  // bridge clique 0 - clique 1
+  edges.push_back({7, 8});  // bridge clique 1 - clique 2
+
+  Hypergraph hg;
+  hg.buildFromTopology(12, edges);
+
+  FMParams params;
+  params.num_parts = 3;
+  params.balance_tolerance = 0.30;  // W/K = 4; allow the 3/5 transit states
+  const FMResult result = partitionFM(hg, params);
+
+  EXPECT_TRUE(result.balanced);
+  EXPECT_DOUBLE_EQ(result.cut_cost, 2.0);
+  for (const int base : {0, 4, 8}) {
+    for (int v = base + 1; v < base + 4; ++v) {
+      EXPECT_EQ(result.partition[v], result.partition[base]) << "vertex " << v;
+    }
+  }
+  EXPECT_NE(result.partition[0], result.partition[4]);
+  EXPECT_NE(result.partition[4], result.partition[8]);
+  EXPECT_NE(result.partition[0], result.partition[8]);
+}
+
+TEST(FMPartitionerTest, KWayDeterminismBalanceAndReportedCost)
+{
+  for (const int k : {3, 4}) {
+    for (const unsigned seed : {31u, 32u}) {
+      const Hypergraph hg = generateRandomHypergraph(typicalParams(seed));
+      FMParams params;
+      params.num_parts = k;
+      params.seed = seed;
+
+      const FMResult a = partitionFM(hg, params);
+      const FMResult b = partitionFM(hg, params);
+      EXPECT_EQ(a.partition, b.partition) << "k " << k << " seed " << seed;
+      EXPECT_EQ(a.cut_cost, b.cut_cost);
+      EXPECT_EQ(a.passes_run, b.passes_run);
+
+      EXPECT_TRUE(a.balanced) << "k " << k << " seed " << seed;
+      expectBalanced(a.partition, params.balance_tolerance, k);
+      EXPECT_DOUBLE_EQ(a.cut_cost, computeConnectivityCost(hg, a.partition, k));
+    }
+  }
+}
+
+TEST(FMPartitionerTest, KWayImprovesOverBlind)
+{
+  const int k = 4;
+  for (const unsigned seed : {41u, 42u, 43u}) {
+    const Hypergraph hg = generateRandomHypergraph(typicalParams(seed));
+
+    // A balanced but topology-blind initial: stripe by vertex index.
+    std::vector<int> initial(hg.numVertices());
+    for (int v = 0; v < hg.numVertices(); ++v) {
+      initial[v] = v % k;
+    }
+    const double initial_cost = computeConnectivityCost(hg, initial, k);
+
+    FMParams params;
+    params.num_parts = k;
+    params.initial = FMParams::InitialPartition::kProvided;
+    const FMResult result = partitionFM(hg, params, &initial);
+    EXPECT_LE(result.cut_cost, initial_cost + 1e-9) << "seed " << seed;
+    EXPECT_TRUE(result.balanced);
+  }
+}
+
+// A provided initial that leaves parts empty is maximally unbalanced;
+// recovery mode must walk the solution back into tolerance.
+TEST(FMPartitionerTest, KWayRecoversFromEmptyParts)
+{
+  const Hypergraph hg = generateRandomHypergraph(typicalParams(51));
+  std::vector<int> initial(hg.numVertices());
+  for (int v = 0; v < hg.numVertices(); ++v) {
+    initial[v] = v % 2;  // parts 2 and 3 start empty
+  }
+
+  FMParams params;
+  params.num_parts = 4;
+  params.initial = FMParams::InitialPartition::kProvided;
+  const FMResult result = partitionFM(hg, params, &initial);
+  EXPECT_TRUE(result.balanced);
+  expectBalanced(result.partition, params.balance_tolerance, 4);
+  EXPECT_DOUBLE_EQ(result.cut_cost,
+                   computeConnectivityCost(hg, result.partition, 4));
+}
+
+// Out-of-range values in a provided initial make it unusable: same
+// fallback as Stage 1, now keyed on [0, num_parts).
+TEST(FMPartitionerTest, KWayProvidedOutOfRangeFallsBack)
+{
+  const Hypergraph hg = generateRandomHypergraph(typicalParams(61));
+  std::vector<int> bad(hg.numVertices(), 0);
+  bad[0] = 3;  // == num_parts: out of range
+
+  FMParams provided;
+  provided.num_parts = 3;
+  provided.initial = FMParams::InitialPartition::kProvided;
+  const FMResult from_bad = partitionFM(hg, provided, &bad);
+
+  FMParams random = provided;
+  random.initial = FMParams::InitialPartition::kRandom;
+  const FMResult from_random = partitionFM(hg, random);
+  EXPECT_EQ(from_bad.partition, from_random.partition);
+  EXPECT_EQ(from_bad.cut_cost, from_random.cut_cost);
+}
+
+// K = 2 through the K-way machinery is Stage 1: the connectivity-1 cost
+// and the spanning cut coincide, and the explicit num_parts = 2 run
+// matches the default-params run exactly.
+TEST(FMPartitionerTest, TwoWayMatchesSpanningCut)
+{
+  const Hypergraph hg = generateRandomHypergraph(typicalParams(71));
+  FMParams params;
+  params.seed = 7;
+  params.num_parts = 2;
+  const FMResult result = partitionFM(hg, params);
+  EXPECT_DOUBLE_EQ(result.cut_cost, computeCut(hg, result.partition));
+  EXPECT_DOUBLE_EQ(result.cut_cost,
+                   computeConnectivityCost(hg, result.partition, 2));
+}
+
+TEST(FMPartitionerTest, SinglePartIsTrivial)
+{
+  const Hypergraph hg = generateRandomHypergraph(typicalParams(81));
+  FMParams params;
+  params.num_parts = 1;
+  const FMResult result = partitionFM(hg, params);
+  EXPECT_TRUE(result.balanced);
+  EXPECT_DOUBLE_EQ(result.cut_cost, 0.0);
+  EXPECT_TRUE(std::all_of(result.partition.begin(),
+                          result.partition.end(),
+                          [](const int p) { return p == 0; }));
+}
+
 // Real data: Nangate45 + the gcd DEF, loaded once for the suite exactly
 // as hypergraph_test does.
 class FMOdbTest : public ::testing::Test
@@ -335,6 +541,43 @@ TEST_F(FMOdbTest, FMOnOdbDesign)
   const FMResult improved = partitionFM(hg, provided, &initial);
   EXPECT_TRUE(improved.balanced);
   EXPECT_LT(improved.cut_cost, initial_cut);
+}
+
+TEST_F(FMOdbTest, KWayOnOdbDesign)
+{
+  Hypergraph hg;
+  hg.buildFromBlock(block_);
+  ASSERT_EQ(hg.numVertices(), 734);
+
+  const int k = 4;
+  FMParams params;
+  params.num_parts = k;
+  params.seed = 9;
+
+  // Balance + reported-cost consistency on real topology.
+  const FMResult result = partitionFM(hg, params);
+  EXPECT_TRUE(result.balanced);
+  expectBalanced(result.partition, params.balance_tolerance, k);
+  EXPECT_DOUBLE_EQ(result.cut_cost,
+                   computeConnectivityCost(hg, result.partition, k));
+
+  // Determinism on real topology.
+  const FMResult again = partitionFM(hg, params);
+  EXPECT_EQ(result.partition, again.partition);
+  EXPECT_EQ(result.cut_cost, again.cut_cost);
+  EXPECT_EQ(result.passes_run, again.passes_run);
+
+  // Cost improvement over a balanced topology-blind initial.
+  std::vector<int> initial(hg.numVertices());
+  for (int v = 0; v < hg.numVertices(); ++v) {
+    initial[v] = v % k;
+  }
+  const double initial_cost = computeConnectivityCost(hg, initial, k);
+  FMParams provided = params;
+  provided.initial = FMParams::InitialPartition::kProvided;
+  const FMResult improved = partitionFM(hg, provided, &initial);
+  EXPECT_TRUE(improved.balanced);
+  EXPECT_LT(improved.cut_cost, initial_cost);
 }
 
 }  // namespace

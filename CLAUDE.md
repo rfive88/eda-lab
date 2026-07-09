@@ -148,22 +148,28 @@ Tests (`test/netlistgen_test.cpp`, no data files needed): a hand-built
 (fanout bounds, counts, pin uniqueness) on a 2000-inst netlist, net-count
 limiting, and seed determinism.
 
-## Partitioning engine (Stage 1)
+## Partitioning engine (Stages 1–2)
 
-`src/engines/partitioning/` — flat 2-way Fiduccia–Mattheyses
-(`partitionFM()` in `fm_partitioner.h`), Stage 1 of a planned multilevel
-K-way multi-objective partitioner. Minimizes weighted cut under a
-vertex-weight balance constraint; pure library (const hypergraph in,
-`FMResult` by value out, no I/O, no exceptions, deterministic for fixed
-(hypergraph, params)). Plane contract, both optional and read-only:
-hyperedge double plane `weight` (cut cost per edge, else 1.0) and vertex
-double plane `area` (balance weight, else 1.0); the engine writes no
-planes. Gains are exact doubles in per-side max-heaps with lazy deletion
-(not integer buckets). `FMParams`: `balance_tolerance` (0.10),
-`max_passes` (10), `seed` (1), `initial` (kRandom | kProvided), optional
-`logger` (debug group "fm"). Note the tolerance must exceed the heaviest
-vertex's share of W/2 or no single move is feasible — matters on tiny
-graphs.
+`src/engines/partitioning/` — flat K-way Fiduccia–Mattheyses
+(`partitionFM()` in `fm_partitioner.h`), Stages 1–2 of a planned
+multilevel K-way multi-objective partitioner. Minimizes the weighted
+connectivity-1 objective — Σ weight(e) × (λ(e) − 1), λ(e) = number of
+distinct parts touching hyperedge e — under a per-part vertex-weight
+balance constraint `[(1 − t)·W/K, (1 + t)·W/K]`; for `num_parts == 2`
+this is exactly the Stage 1 weighted spanning cut and the K = 2 path
+reproduces Stage 1 results bit-for-bit. Pure library (const hypergraph
+in, `FMResult` by value out, no I/O, no exceptions, deterministic for
+fixed (hypergraph, params)). Plane contract, both optional and
+read-only: hyperedge double plane `weight` (cut cost per edge, else 1.0)
+and vertex double plane `area` (balance weight, else 1.0); the engine
+writes no planes. Core structure: per-hyperedge per-part pin counts with
+λ maintained incrementally; gains are exact doubles, one entry per
+(vertex, target part), in per-source-part max-heaps with lazy deletion
+(not integer buckets). `FMParams`: `num_parts` (2), `balance_tolerance`
+(0.10), `max_passes` (10), `seed` (1), `initial` (kRandom | kProvided,
+provided values in `[0, num_parts)`), optional `logger` (debug group
+"fm"). Note the tolerance must exceed the heaviest vertex's share of W/K
+or no single move is feasible — matters on tiny graphs.
 
 `generateRandomHypergraph()` (`random_hypergraph.h`) makes dbBlock-free
 test hypergraphs via `buildFromTopology`: seed-determined, bit-identical
@@ -171,7 +177,7 @@ across platforms (raw mt19937 draws, no `uniform_int_distribution`),
 distinct pins per edge, degrees uniform in `[min_degree, max_degree]`
 clamped to `[2, num_vertices]`.
 
-Tests: `test/fm_partitioner_test.cpp` (only the gcd-design test needs
+Tests: `test/fm_partitioner_test.cpp` (only the gcd-design tests need
 `EDA_LAB_DATA_DIR`). Full details in `src/engines/partitioning/README.md`.
 
 Linking gotcha: any new object that makes the linker touch `utl.a`'s

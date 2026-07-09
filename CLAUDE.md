@@ -42,6 +42,49 @@ ctest --test-dir build    # or run build/hypergraph_test directly
    are fine as-is. `run/` contents are git-ignored (except its README.md and
    `.gitkeep`).
 
+## Flow Diagrams (FLOW.md)
+
+1. **STANDING CONVENTION:** every engine directory and every non-trivial
+   multi-file component directory (e.g. `src/hypergraph`, `src/netlistgen`,
+   `src/engines/*`) carries a single FLOW.md.
+
+2. **FLOW.md contains Mermaid diagrams showing the algorithmic/logical flow
+   of the code** — what it does and why — not merely call structure.
+   Structure:
+   - Short intro paragraph: what the component is.
+   - Per-file sections: for each significant source file, brief prose plus
+     a Mermaid diagram of that file's internal flow (key functions' control
+     flow, or the data structure it manages).
+   - Engine/component-level section: one or more Mermaid diagrams of the
+     overall algorithm that spans the files, end to end.
+   - Prose stays tight; diagrams carry the load. Prose must name real
+     functions/types from the source so a reader can cross-check diagram
+     vs code.
+   - Use Mermaid flowcharts (`graph TD`) for control/algorithm flow,
+     sequence diagrams (`sequenceDiagram`) for cross-component interaction.
+     Prefer several small focused diagrams over one large one. Mermaid must
+     be valid syntax.
+
+3. **FLOW.md is text** (committed, pushed, rendered by Mermaid on GitHub /
+   VS Code preview). It is not auto-extracted — it is maintained by
+   discipline, via two maintenance paths:
+   - **Same-commit rule:** any session that makes a functional/logic change
+     to files in a component directory MUST update that directory's
+     FLOW.md (the affected per-file section(s) and the engine-level
+     diagram) in the same commit. Identical in spirit to the README
+     same-commit rule. A FLOW.md that has drifted from the code is worse
+     than none, because it misleads.
+   - **On-demand regeneration:** FLOW.md can be regenerated at any time by
+     re-reading the current source in the directory as ground truth and
+     rebuilding the diagrams from scratch to match. Use this after manual
+     edits, direct fixes, or any change that bypassed the same-commit rule.
+     Regeneration does not assume the existing FLOW.md is correct — it
+     reflects what the code actually is now.
+
+4. **Cross-reference:** each directory's README.md should carry a one-line
+   pointer — "See FLOW.md for algorithmic flow diagrams." — added as
+   directories get their FLOW.md.
+
 ## Layout
 
 - `src/dbio/hello_odb.cpp` — LEF/DEF round-trip smoke test against OpenDB.

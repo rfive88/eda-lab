@@ -21,9 +21,36 @@ target_link_libraries(hypergraph PUBLIC odb utl)
 # swig/Tcl wrapper objects; see src/support/ord_shim.cpp.
 add_library(ord_shim src/support/ord_shim.cpp)
 
-add_library(netlistgen src/engines/netlistgen/netlistgen.cpp)
+add_library(netlistgen
+  src/engines/netlistgen/netlistgen.cpp
+  src/engines/netlistgen/netlist_writers.cpp
+  src/engines/netlistgen/netlist_validation.cpp)
 target_include_directories(netlistgen PUBLIC src)
 target_link_libraries(netlistgen PUBLIC odb utl ord_shim)
+
+# nlohmann::json — header-only JSON parser for the standalone CLI's config
+# input only (never linked into the netlistgen library). Pulled via
+# FetchContent pinned to a tagged release from GitHub (an allowed domain).
+include(FetchContent)
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG v3.11.3
+  GIT_SHALLOW TRUE)
+set(JSON_BuildTests OFF CACHE INTERNAL "")
+FetchContent_MakeAvailable(nlohmann_json)
+
+# CLI config layer: JSON -> SyntheticNetlistSpec + validate-before-write policy.
+# Kept separate from the netlistgen library so JSON never leaks into the
+# in-memory API; linked into both the CLI executable and the CLI tests.
+add_library(netlistgen_cli_core src/engines/netlistgen/cli_config.cpp)
+target_include_directories(netlistgen_cli_core PUBLIC src)
+target_link_libraries(netlistgen_cli_core
+                      PUBLIC netlistgen odb utl
+                      PRIVATE nlohmann_json::nlohmann_json)
+
+add_executable(netlistgen_cli src/engines/netlistgen/netlistgen_cli.cpp)
+target_link_libraries(netlistgen_cli PRIVATE netlistgen_cli_core)
 
 add_library(partitioning
   src/engines/partitioning/random_hypergraph.cpp
@@ -58,6 +85,16 @@ target_link_libraries(netlistgen_stageb_test PRIVATE netlistgen hypergraph odb
 add_executable(netlistgen_link_smoke test/netlistgen_link_smoke.cpp)
 target_link_libraries(netlistgen_link_smoke PRIVATE netlistgen odb utl)
 
+add_executable(netlistgen_stagec_test test/netlistgen_stagec_test.cpp)
+target_compile_definitions(netlistgen_stagec_test
+                           PRIVATE EDA_LAB_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+                                   NETLISTGEN_CLI_BIN="$<TARGET_FILE:netlistgen_cli>")
+target_link_libraries(netlistgen_stagec_test PRIVATE netlistgen_cli_core
+                                                     netlistgen odb utl
+                                                     GTest::gtest
+                                                     GTest::gtest_main)
+add_dependencies(netlistgen_stagec_test netlistgen_cli)
+
 add_executable(fm_partitioner_test test/fm_partitioner_test.cpp)
 target_compile_definitions(fm_partitioner_test
                            PRIVATE EDA_LAB_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
@@ -70,4 +107,5 @@ add_test(NAME hypergraph_test COMMAND hypergraph_test)
 add_test(NAME netlistgen_test COMMAND netlistgen_test)
 add_test(NAME netlistgen_stageb_test COMMAND netlistgen_stageb_test)
 add_test(NAME netlistgen_link_smoke COMMAND netlistgen_link_smoke)
+add_test(NAME netlistgen_stagec_test COMMAND netlistgen_stagec_test)
 add_test(NAME fm_partitioner_test COMMAND fm_partitioner_test)

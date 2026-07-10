@@ -233,6 +233,11 @@ void NetlistBuilder::ensureSyntheticTech()
   if (tech_ready_) {
     return;
   }
+  // Set database units before creating the block: the block inherits
+  // dbu-per-micron from the tech at creation, and DefOut divides def-units by
+  // dbu-per-micron (0 on a fresh db) when writing UNITS/DIEAREA. 2000 DBU/um
+  // matches the nominal site pitch estimateDieArea() uses in synthetic mode.
+  db_->setDbuPerMicron(2000);
   odb::dbTech* tech = odb::dbTech::create(db_, "tech");
   odb::dbLib::create(db_, "lib", tech);
   odb::dbChip* chip = odb::dbChip::create(db_, tech);

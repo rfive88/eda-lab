@@ -2,13 +2,22 @@
 
 The netlistgen engine (`src/engines/netlistgen/`) constructs `dbBlock`
 netlists through the OpenDB API — synthetically or backed by real LEF cells —
-for use as test/benchmark fixtures. Two pieces in one translation unit
-(`netlistgen.h` / `netlistgen.cpp`): `NetlistBuilder`, owner of a fresh
-`dbDatabase` that wraps create/connect and LEF loading, and the free function
-`generateSynthetic()`, which fills a builder's block from a
-`SyntheticNetlistSpec`. This reflects the code as of Stage B (LEF-backed
-generation + statistical cell mix + max-entropy solve). Loop-free net
-formation and writers arrive in Stages C–E.
+for use as test/benchmark fixtures. Core pieces: `NetlistBuilder`, owner of a
+fresh `dbDatabase` that wraps create/connect and LEF loading, and the free
+function `generateSynthetic()`, which fills a builder's block from a
+`SyntheticNetlistSpec` (`netlistgen.h` / `netlistgen.cpp`). Stage C adds output
+and a driver: the DEF / `.odb` writers (`netlist_writers.h/.cpp`), the net
+well-formedness check (`netlist_validation.h/.cpp`), and a standalone
+JSON-driven CLI (`cli_config.h/.cpp`, `netlistgen_cli.cpp`). This reflects the
+code as of Stage C (LEF-backed generation + statistical cell mix + max-entropy
+solve + writers + validation + CLI).
+
+**Loop-avoidance caveat.** Combinational-loop avoidance is **Stage D** (not yet
+landed): net formation still pairs drivers/sinks from shuffled pools, so
+generated blocks — and any DEF/`.odb` the CLI writes — are structurally
+well-formed but **may contain combinational loops**. Treat them as
+preview/manual-inspection artifacts, not yet valid downstream fixtures.
+Primary I/O ports and a Verilog writer are **Stage E**.
 
 ## `netlistgen.h` — API surface
 
@@ -150,7 +159,7 @@ Both regimes end here. Terminals are bucketed into driver/sink pools by
 IoType, with power/ground excluded by `dbSigType` — for synthetic masters
 (no power pins) this is identical to Stage A, keeping legacy output
 bit-identical. Every iterm is popped at most once, so the netlist is valid
-(each pin on ≤ 1 net) — **though not yet acyclic; Stage C adds that**.
+(each pin on ≤ 1 net) — **though not yet acyclic; Stage D adds that**.
 
 ```mermaid
 graph TD
@@ -212,4 +221,120 @@ sequenceDiagram
   GS-->>Caller: nets_made (or -1)
   Caller->>HG: buildFromBlock(nb.block())
   HG-->>Caller: hypergraph view
+```
+
+## `netlist_validation.cpp` — well-formedness check (Stage C)
+
+`validateNetlist(block)` walks every `dbNet` and tallies its connected
+`dbITerm`s by IoType (power/ground skipped by `dbSigType`) via `tallyITerms`,
+returning on the first net that breaks a structural invariant. This is a
+distinct guarantee from Stage D's loop-freedom: a net can be perfectly
+well-formed and still sit on a combinational cycle. The tally struct is
+factored so Stage E can fold primary-input/-output `dbBTerm`s into the same
+driver/sink totals before the verdict.
+
+```mermaid
+graph TD
+  vn["validateNetlist(block)"] --> nul{"block null?"}
+  nul -->|yes| okv["ok (nothing to check)"]
+  nul -->|no| loop["for each dbNet"]
+  loop --> tally["tallyITerms: for each iterm<br/>skip POWER/GROUND<br/>OUTPUT -> drivers<br/>INPUT/INOUT -> sinks<br/>++connected"]
+  tally --> c0{"connected == 0?"}
+  c0 -->|yes| fdangle["fail: 'net dangling'"]
+  c0 -->|no| d1{"drivers != 1?"}
+  d1 -->|yes| fdrv["fail: 'N drivers (expected 1)'"]
+  d1 -->|no| s1{"sinks < 1?"}
+  s1 -->|yes| fsnk["fail: 'no sinks'"]
+  s1 -->|no| loop
+  loop --> okv
+```
+
+## `netlist_writers.cpp` — DEF / `.odb` output (Stage C)
+
+Two thin wrappers, callable independently of the CLI. `writeDef` drives
+`odb::DefOut` at version 5.8 (no PINS section — no primary ports until Stage E);
+it supplies a local `utl::Logger` when the caller passes none. `writeOdb` wraps
+`dbDatabase::write`, which takes a `std::ostream`, in a checked `ofstream`.
+(Synthetic-tech DBUs are set to 2000/µm in `ensureSyntheticTech` so DefOut's
+def-units ÷ dbu-per-micron scaling is well-defined; LEF mode inherits real
+units from the tech LEF.)
+
+```mermaid
+graph TD
+  wd["writeDef(block, path, logger?)"] --> wdnul{"block null?"}
+  wdnul -->|yes| wdf["return false"]
+  wdnul -->|no| defo["DefOut(logger or local)<br/>setVersion(DEF_5_8)<br/>writeBlock(block, path)"]
+  defo --> wdret["return writeBlock result"]
+
+  wo["writeOdb(db, path)"] --> wonul{"db null?"}
+  wonul -->|yes| wof["return false"]
+  wonul -->|no| ofs["ofstream(path, binary)"]
+  ofs --> ofsok{"open ok?"}
+  ofsok -->|no| wof
+  ofsok -->|yes| dbw["db->write(stream)"]
+  dbw --> woret["return stream.good()"]
+```
+
+## `cli_config.cpp` / `netlistgen_cli.cpp` — the CLI (Stage C)
+
+JSON is confined to the CLI layer — it never reaches `NetlistBuilder` /
+`generateSynthetic`. `parseCliConfig` deserialises the JSON into a
+`SyntheticNetlistSpec` plus CLI-only output paths, enforcing CLI-level rules
+(well-formed JSON, required `instance_count`, ≥1 output path); spec-level rules
+stay with `validateSpecConfig` at generation time. `runCliFromFile` is the one
+pipeline: parse → `generateSynthetic` → `estimateDieArea` →
+`validateAndWrite` → print counts. `validateAndWrite` gates output on
+`validateNetlist`, so a malformed block writes **nothing** (fail-fast). `main()`
+in `netlistgen_cli.cpp` is a thin wrapper over `runCliFromFile`.
+
+```mermaid
+graph TD
+  main["main(argc, argv)"] --> argc{"argc == 2?"}
+  argc -->|no| usage["print usage; return 1"]
+  argc -->|yes| run
+
+  run["runCliFromFile(path, out, err)"] --> rd{"open file?"}
+  rd -->|no| e1["err; return 1"]
+  rd -->|yes| parse["parseCliConfig(text)"]
+  parse --> pok{"ok?"}
+  pok -->|no| e1
+  pok -->|yes| gen["generateSynthetic(builder, spec)"]
+  gen --> gok{"nets >= 0?"}
+  gok -->|no| e1
+  gok -->|yes| die["estimateDieArea(num_insts)"]
+  die --> vaw["validateAndWrite(builder, config, err)"]
+  vaw --> valid{"validateNetlist ok?"}
+  valid -->|no| e1b["err 'validation failed'<br/>write nothing; return 1"]
+  valid -->|yes| wdef["if output_def_path: writeDef"]
+  wdef --> wodb["if output_odb_path: writeOdb"]
+  wodb --> counts["print instance/net/pin counts"]
+  counts --> ok0["return 0"]
+```
+
+### CLI parse mapping
+
+```mermaid
+graph LR
+  subgraph JSON
+    j1["instance_count (required)"]
+    j2["seed / net_count(null->-1)"]
+    j3["fanout_range {min,max}"]
+    j4["tech_lef_path / cell_lef_paths"]
+    j5["sequential_ratio<br/>combinational_pin_distribution {2,3,4,5,6+}<br/>target_avg_fanout<br/>distribution_tolerance_pct"]
+    j6["output_def_path / output_odb_path<br/>(CLI-only, >=1 required)"]
+  end
+  subgraph CliConfig
+    s1["spec.num_insts"]
+    s2["spec.seed / spec.num_nets"]
+    s3["spec.min_fanout / max_fanout"]
+    s4["spec.tech_lef_path / cell_lef_paths"]
+    s5["spec.sequential_ratio / ...dist / target / tol"]
+    s6["config.output_def_path / output_odb_path"]
+  end
+  j1 --> s1
+  j2 --> s2
+  j3 --> s3
+  j4 --> s4
+  j5 --> s5
+  j6 --> s6
 ```

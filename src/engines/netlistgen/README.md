@@ -5,16 +5,28 @@ calls — optionally backed by real LEF cells — so tests and benchmarks can
 create netlists of any size with exactly known or statistically controlled
 topology, then feed them to `Hypergraph::buildFromBlock()`.
 
-> **Migration status (Stage B of 5).** Stage A promoted `netlistgen` from a
+> **Migration status (Stage C of 5).** Stage A promoted `netlistgen` from a
 > Stage 1/2 test utility into an engine and made pin access IoType-based.
-> **Stage B (this stage)** adds LEF-backed masters (real cells) and a
-> statistical cell mix (forward + max-entropy modes). Still landing later:
-> - **Stage C** — combinational-loop avoidance (provably acyclic net
->   formation). **Until then the generator can produce combinational cycles**
->   — net formation still pairs drivers/sinks from shuffled pools, so this
->   stage's output must not be treated as a valid acyclic netlist.
-> - **Stage D** — DEF / `.odb` writers and a standalone CLI executable.
+> Stage B added LEF-backed masters (real cells) and a statistical cell mix
+> (forward + max-entropy modes). **Stage C (this stage)** adds DEF / `.odb`
+> writers, a net well-formedness validation pass, and a standalone
+> JSON-driven CLI executable (`netlistgen_cli`). Still landing later:
+> - **Stage D** — combinational-loop avoidance (provably acyclic net
+>   formation). **Until it lands the generator can produce combinational
+>   cycles** — net formation still pairs drivers/sinks from shuffled pools.
 > - **Stage E** — primary I/O ports and a Verilog writer.
+>
+> ⚠️ **Loop-avoidance caveat (read before using generated files).** Stage C's
+> writers and CLI produce output that is structurally **well-formed** (every
+> net has exactly one driver, ≥1 sink, no dangling nets — enforced by the
+> validation pass below) but **not yet guaranteed free of combinational
+> loops**. That guarantee is Stage D. Treat DEF / `.odb` files from this stage
+> as **preview / manual-inspection artifacts** for getting a feel for the
+> generator's output shape — **not** as valid fixtures for Stage 3 or any
+> other downstream flow. Stage C does **not** complete "Phase 1"; Stage D
+> still needs to land first. (Stage C was deliberately sequenced ahead of
+> Stage D to get hands-on CLI output sooner — the reordering is safe because
+> loop avoidance depends only on Stage B's work, not on this stage.)
 >
 > See `FLOW.md` for algorithmic flow diagrams.
 
@@ -36,7 +48,9 @@ Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
   `estimateDieArea(num_insts, utilization)` auto-sizes a near-square
   placement region from the instance count and the loaded tech's site pitch
   (nominal pitch if none), records it on the block, and returns the box.
-  Instances stay `UNPLACED`; Stage D's DEF writer will consume it.
+  Instances stay `UNPLACED`; the DEF writer consumes it for the `DIEAREA`.
+  (Synthetic tech now sets 2000 DBU/µm so DefOut's unit scaling is defined;
+  LEF mode inherits real units from the tech LEF.)
 
 - **`generateSynthetic(builder, spec)`** populates the block from a
   `SyntheticNetlistSpec` using a seeded `std::mt19937`. Two mix regimes:
@@ -104,6 +118,118 @@ Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
   (distribution sum, mode exclusivity, target range, non-empty buckets),
   which stay hard failures.
 
+## Net well-formedness validation (Stage C)
+
+`validateNetlist(block)` (`netlist_validation.h`) is a defensive, structural
+correctness check — **independent of and in addition to** Stage D's
+combinational-loop-freedom guarantee. It walks every `dbNet` and confirms:
+
+- **Exactly one driver** — exactly one connected `dbITerm` with
+  `IoType::OUTPUT`. Zero or more than one is a failure.
+- **At least one sink** — at least one connected `dbITerm` with
+  `IoType::INPUT` (`INOUT` counts as a sink too). Zero sinks is a failure
+  (a driver with nothing to drive — dangling).
+- **No dangling nets** — a net with zero connected iterms is a failure.
+
+Power/ground iterms (`dbSigType::POWER`/`GROUND`) are ignored; classification
+is **IoType-based** (the Stage A refactor), never name-based. It returns a
+`NetlistValidation { bool ok; std::string message; }` naming the first
+offending net. This is a **hard** structural property — unlike the statistical
+`distribution_tolerance_pct` checks, which are sampling-noise warnings. This
+stage considers only `dbITerm`s (no primary ports yet); the per-net tally is
+factored so Stage E can fold primary-input/-output `dbBTerm`s into the same
+driver/sink counts. The CLI runs this automatically after generation and
+**refuses to write any output if it fails** (fail-fast); Stage 3 test code or
+other callers can invoke it directly on their own blocks.
+
+## DEF / `.odb` writers (Stage C)
+
+`netlist_writers.h` exposes two thin wrappers, callable independently of the
+CLI (Stage E's Verilog writer, pybind11 bindings, or Stage 3 test code can
+call them directly). Available in **both** synthetic and LEF-backed mode:
+
+- `writeDef(block, path, logger = nullptr)` — drives `odb::DefOut` at DEF 5.8.
+  No `PINS` section (no primary ports until Stage E). Returns false on write
+  failure; supplies a throwaway logger when the caller passes none.
+- `writeOdb(db, path)` — wraps `dbDatabase::write` (which takes a
+  `std::ostream`, not a filename) in a checked `ofstream`. Returns false if
+  the file can't be opened or the stream goes bad.
+
+## Standalone CLI (`netlistgen_cli`, Stage C)
+
+A plain C++ executable (same pattern as `hello_odb`) that reads a JSON config,
+generates through the **same** `generateSynthetic` in-memory callers use,
+validates well-formedness, and writes the requested outputs:
+
+```bash
+build/netlistgen_cli path/to/config.json
+```
+
+**JSON is an input to this executable only** — it is not part of the in-memory
+API. The in-memory path (`NetlistBuilder` + `generateSynthetic`) is driven by
+constructing a `SyntheticNetlistSpec` in C++; JSON parsing lives in the
+separate `cli_config` translation unit (linked into the CLI and the CLI tests,
+never into the `netlistgen` library). The schema is a serialization of
+`SyntheticNetlistSpec` plus CLI-only I/O fields:
+
+| JSON field | Maps to | Notes |
+|------------|---------|-------|
+| `instance_count` | `spec.num_insts` | **Required**, `> 0`. |
+| `seed` | `spec.seed` | Optional. |
+| `net_count` | `spec.num_nets` | `null`/absent → `-1` (as many as pools allow). |
+| `fanout_range` `{min,max}` | `spec.min_fanout` / `max_fanout` | Optional. |
+| `tech_lef_path` | `spec.tech_lef_path` | Optional; engages LEF mode. |
+| `cell_lef_paths` | `spec.cell_lef_paths` | Optional array. |
+| `sequential_ratio` | `spec.sequential_ratio` | Optional. |
+| `combinational_pin_distribution` | `spec.combinational_pin_distribution` | Object keyed `"2","3","4","5","6+"`, sum 100. Mode A. |
+| `target_avg_fanout` | `spec.target_avg_fanout` | Mode B (mutually exclusive with the distribution). |
+| `distribution_tolerance_pct` | `spec.distribution_tolerance_pct` | Optional (default 2.0). |
+| `output_def_path` | CLI-only | Write DEF here if set. |
+| `output_odb_path` | CLI-only | Write `.odb` here if set. |
+
+**Output-path independence:** `output_def_path` and `output_odb_path` are each
+independently optional — whichever are set are written, the rest skipped — but
+**at least one must be set** (fail-fast otherwise). No cell is ever named in
+config: the mix is fully determined by `sequential_ratio` plus exactly one of
+`combinational_pin_distribution` or `target_avg_fanout`. With no LEF fields,
+generation is synthetic-only and the DEF's `DIEAREA` is auto-sized via the
+nominal pitch. On success the CLI prints instance / net / pin counts to stdout.
+JSON is parsed with **`nlohmann::json`** (header-only, pulled via CMake
+`FetchContent` pinned to `v3.11.3`).
+
+Mode A example (explicit distribution, LEF-backed, both outputs):
+
+```json
+{
+  "seed": 42,
+  "instance_count": 5000,
+  "net_count": null,
+  "fanout_range": { "min": 2, "max": 6 },
+  "tech_lef_path": "data/nangate45/Nangate45_tech.lef",
+  "cell_lef_paths": ["data/nangate45/Nangate45_stdcell.lef"],
+  "sequential_ratio": 0.0,
+  "combinational_pin_distribution": {"2":20,"3":30,"4":20,"5":20,"6+":10},
+  "distribution_tolerance_pct": 2.0,
+  "output_def_path": "run/generated.def",
+  "output_odb_path": "run/generated.odb"
+}
+```
+
+Mode B example (target average fanout, synthetic-only, DEF-only):
+
+```json
+{
+  "seed": 42,
+  "instance_count": 5000,
+  "fanout_range": { "min": 2, "max": 6 },
+  "target_avg_fanout": 3.4,
+  "output_def_path": "run/generated.def"
+}
+```
+
+Per the run-outputs convention, point `output_*_path` under `run/` (or a temp
+path) — never the repo root or source tree.
+
 ## Input / output contract
 
 Standalone in-memory library: **no hypergraph attribute planes** read or
@@ -138,7 +264,10 @@ The statistical mix is engaged when `tech_lef_path`, `sequential_ratio`,
 Output for a given `(spec, seed)` is reproducible across runs on a fixed
 toolchain: the generator draws from a seeded `std::mt19937` and instance /
 pin iteration order is fixed by OpenDB set order. The legacy path is
-additionally bit-identical to Stage A.
+additionally bit-identical to Stage A. Determinism carries through the CLI: a
+given JSON config produces the same block — and hence the same DEF / `.odb` —
+each run. Scale reference: **~500k insts / ~1.4M pins in ~2 s** for synthetic
+mode; LEF-backed mode has not been separately benchmarked at that scale yet.
 
 ## How to run
 
@@ -172,11 +301,25 @@ eda::Hypergraph hg;
 hg.buildFromBlock(nb.block());
 ```
 
+Write outputs and validate (writers + validation are library functions):
+
+```cpp
+eda::NetlistBuilder nb;
+eda::SyntheticNetlistSpec spec;   // ... populate ...
+eda::generateSynthetic(nb, spec);
+nb.estimateDieArea(spec.num_insts);            // size DIEAREA for DEF
+if (eda::validateNetlist(nb.block()).ok) {     // structural well-formedness
+  eda::writeDef(nb.block(), "run/out.def", nb.logger());
+  eda::writeOdb(nb.db(), "run/out.odb");
+}
+```
+
 ### Tests
 
 ```bash
 cmake -B build
-cmake --build build --target netlistgen_test netlistgen_stageb_test netlistgen_link_smoke
+cmake --build build --target netlistgen_test netlistgen_stageb_test \
+      netlistgen_stagec_test netlistgen_link_smoke netlistgen_cli
 ctest --test-dir build -R "netlistgen" --output-on-failure
 ```
 
@@ -189,6 +332,24 @@ ctest --test-dir build -R "netlistgen" --output-on-failure
   LEF-backed generation, multi-output exclusion, empty-bucket/empty-sequential
   fail-fast (using `data/synth_cells/twobucket.lef`), large-run statistical
   validation, Mode B mean, determinism, and die-area sizing.
+- `test/netlistgen_stagec_test.cpp` — Stage C (needs `EDA_LAB_DATA_DIR` and the
+  built `netlistgen_cli` binary): well-formedness passing on synthetic +
+  LEF-backed output and flagging hand-built dangling / driverless /
+  multi-driver / sinkless nets; DEF + `.odb` writers producing files; JSON
+  parsing (Mode A/B valid, missing `instance_count`, no output path,
+  malformed JSON); the CLI validate-before-write fail-fast on a malformed
+  block; and a CLI smoke test that spawns `netlistgen_cli`, round-trips the
+  DEF back through `defin`, and confirms instance/net counts.
 - `test/netlistgen_link_smoke.cpp` — library-linkage guard.
 
-Scale reference: ~500k insts / ~1.4M pins generate in about 2 s.
+Scale reference: ~500k insts / ~1.4M pins generate in about 2 s (synthetic).
+
+## Open questions / follow-on
+
+- **Stage D** — combinational-loop avoidance (the completion gate for Phase 1).
+- **Stage E (not yet implemented)** — primary I/O ports (`PINS` section,
+  primary-input `dbBTerm` drivers / primary-output `dbBTerm` sinks folded into
+  `validateNetlist`) and a Verilog writer, plus `output_verilog_path` and
+  primary-port fields on the CLI config.
+- Custom prior distribution for Mode B's max-entropy tilt (currently uniform).
+- YAML config support alongside JSON.

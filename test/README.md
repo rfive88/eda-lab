@@ -7,7 +7,7 @@ GTest suites for eda-lab.
 ```bash
 cmake -B build              # Debug tree; build-release/ is the Release tree
 cmake --build build
-ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_link_smoke|fm_partitioner_test" --output-on-failure
+ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_stageb_test|netlistgen_stagec_test|netlistgen_link_smoke|fm_partitioner_test" --output-on-failure
 ```
 
 The `-R` filter matters: a bare `ctest` also picks up the vendored OpenROAD
@@ -55,6 +55,20 @@ cd run
   (`NetlistBuilderTest.ExactTopology`), and `generateSynthetic` conformance
   on a 2000-inst netlist (fanout bounds, one driver per net, no pin reuse),
   net-count limiting, and seed determinism (`SyntheticNetlistTest`).
+- `netlistgen_stagec_test.cpp` — Stage C of the same engine: the DEF / `.odb`
+  writers, net well-formedness validation, JSON config parsing, and the
+  standalone `netlistgen_cli` executable. Needs `EDA_LAB_DATA_DIR` (Nangate45
+  LEF) and the built `netlistgen_cli` binary (path compiled in via
+  `NETLISTGEN_CLI_BIN`; `add_dependencies` ensures it is built first). Covers:
+  `validateNetlist` passing on synthetic + LEF-backed output and flagging
+  hand-built dangling / driverless / multi-driver / sinkless nets; the writers
+  producing files; JSON parsing (Mode A/B valid, missing `instance_count`, no
+  output path, malformed JSON); the CLI's validate-before-write fail-fast on a
+  malformed block (nothing written); and a CLI smoke test that spawns the
+  binary, reads the DEF back through `defin`, and confirms instance/net counts.
+  **Caveat:** this proves output is structurally well-formed, *not* that it is
+  combinational-loop-free — that guarantee is Stage D. `netlistgen` is not yet
+  "fully promoted / ready for Stage 3" until Stage D lands.
 - `netlistgen_link_smoke.cpp` — library-linkage guard for the same engine,
   no data files needed. A plain `main()` (no GTest) that links the
   `netlistgen` library as an external consumer would
@@ -99,7 +113,8 @@ cd run
 ## Input sources
 
 - Real ODB data (`data/nangate45/` LEF + `data/gcd_nangate45.def`):
-  `HypergraphTest` and `FMOdbTest` fixtures only.
+  `HypergraphTest` and `FMOdbTest` fixtures; `netlistgen_stageb_test` and
+  `netlistgen_stagec_test` also use the Nangate45 LEF (no DEF).
 - Programmatic dbBlocks via `src/engines/netlistgen/` (OpenDB API, no
   LEF/DEF): `netlistgen_test.cpp` and `netlistgen_link_smoke.cpp`.
 - dbBlock-free hypergraphs via `buildFromTopology` /

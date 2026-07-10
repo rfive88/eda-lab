@@ -53,11 +53,14 @@ bool validateAndWrite(NetlistBuilder& builder,
                       std::ostream& err);
 
 // Full CLI run: read the config file at `config_path`, parse it, generate,
-// auto-size the die area, validate, and write requested outputs, printing
-// instance/net/pin counts to `out`. Returns a process exit code (0 = success);
-// diagnostics go to `err`. main() is a thin wrapper over this.
+// auto-size the die area, validate, and write requested outputs. Phase markers
+// and the final instance/net/pin summary are emitted through a utl::Logger
+// (stdout) as info; `verbosity` (the CLI's -verbosity flag) raises that
+// logger's debug level for the whole run (0 = default phase markers only; see
+// support/logging.h). Hard error diagnostics still go to `err`. Returns a
+// process exit code (0 = success). main() is a thin wrapper over this.
 int runCliFromFile(const std::string& config_path,
-                   std::ostream& out,
-                   std::ostream& err);
+                   std::ostream& err,
+                   int verbosity = 0);
 
 }  // namespace eda

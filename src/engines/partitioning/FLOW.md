@@ -37,7 +37,11 @@ All logic lives in the anonymous-namespace class `FMEngine`, constructed with
 ### Setup: `run()` entry sequence
 
 `run()` reads `hg.numVertices()`/`numHyperedges()` into `n_`/`m_`, then calls
-four setup steps before the pass loop.
+four setup steps before the pass loop. When a `logger` is attached, `run()`
+and `runPass()` emit **debug-gated** trace (`debugPrint`, group `"fm"`): run
+setup + convergence + final at level 1, per-pass cut deltas at level 1, and
+per-move gains at level 3 (capped). Nothing prints at verbosity 0, preserving
+the pure-library "nothing prints" contract — see the README's verbosity note.
 
 ```mermaid
 graph TD

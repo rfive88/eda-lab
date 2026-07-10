@@ -59,11 +59,19 @@
 #include <vector>
 
 #include "hypergraph/hypergraph.h"
+#include "support/logging.h"
 #include "utl/Logger.h"
 
 namespace eda {
 
 namespace {
+
+// Debug group for FM verbosity. partitionFM is a pure library with no CLI flag
+// of its own and an optional logger; all of its output is debug-gated (group
+// "fm"), so it stays silent unless a caller both passes a logger and raises the
+// debug level. See support/logging.h for the level scheme: level 1 = pass-level
+// trace, level 2 = per-pass setup detail, level 3 = per-move gains (capped).
+constexpr const char* kGroup = "fm";
 
 // Comparison slack for the double-valued cut/balance bookkeeping. "Better"
 // always means "better by more than kEps", so FP noise can neither create
@@ -594,6 +602,13 @@ bool FMEngine::runPass()
     // riding through negative-gain moves is what lets a pass escape
     // local minima that greedy improvement cannot.
     move_from.push_back(part_[cand[side].vertex]);
+    if (params_.logger != nullptr && step < kTraceCap) {
+      debugPrint(params_.logger, utl::UKN, kGroup, kVerbosityTrace,
+                 "  move {}: v{} part {} -> {}, gain {:.6g}{}", step,
+                 cand[side].vertex, part_[cand[side].vertex], cand[side].target,
+                 cand[side].gain,
+                 step + 1 == kTraceCap ? " (per-move trace capped)" : "");
+    }
     applyMove(cand[side].vertex, cand[side].target, heaps.data());
     move_order.push_back(cand[side].vertex);
 
@@ -628,15 +643,11 @@ bool FMEngine::runPass()
   cut_ = best_cut;
 
   if (params_.logger != nullptr) {
-    params_.logger->debug(utl::UKN,
-                          "fm",
-                          "pass: cut {:.6g} -> {:.6g}, moves tried {}, "
-                          "kept {}, balanced {}",
-                          start_cut,
-                          best_cut,
-                          move_order.size(),
-                          best_prefix,
-                          best_balanced);
+    debugPrint(params_.logger, utl::UKN, kGroup, kVerbosityDetail,
+               "pass: cut {:.6g} -> {:.6g}, moves tried {}, kept {}, "
+               "balanced {}",
+               start_cut, best_cut, move_order.size(), best_prefix,
+               best_balanced);
   }
 
   return best_prefix > 0;
@@ -657,9 +668,22 @@ FMResult FMEngine::run(const std::vector<int>* initial)
   buildIncidence();
   setInitialPartition(initial);
 
+  if (params_.logger != nullptr) {
+    debugPrint(params_.logger, utl::UKN, kGroup, kVerbosityDetail,
+               "partitionFM: {} vertices, {} hyperedges, K={}, tol={:.3g}, "
+               "W={:.6g}, part bounds [{:.6g}, {:.6g}]",
+               n_, m_, k_, params_.balance_tolerance, total_weight_, min_part_,
+               max_part_);
+  }
+
   for (int pass = 0; pass < params_.max_passes; ++pass) {
     ++result.passes_run;
     if (!runPass()) {
+      if (params_.logger != nullptr) {
+        debugPrint(params_.logger, utl::UKN, kGroup, kVerbosityDetail,
+                   "partitionFM: converged after pass {} (no improving prefix)",
+                   pass + 1);
+      }
       break;
     }
   }
@@ -671,6 +695,11 @@ FMResult FMEngine::run(const std::vector<int>* initial)
   result.partition = std::move(part_);
   result.cut_cost = cut_;
   result.balanced = isBalanced();
+  if (params_.logger != nullptr) {
+    debugPrint(params_.logger, utl::UKN, kGroup, kVerbosityDetail,
+               "partitionFM: done — {} passes, cut {:.6g}, balanced {}",
+               result.passes_run, result.cut_cost, result.balanced);
+  }
   return result;
 }
 

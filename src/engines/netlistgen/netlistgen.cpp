@@ -9,11 +9,19 @@
 #include "odb/db.h"
 #include "odb/geom.h"
 #include "odb/lefin.h"
+#include "support/logging.h"
 #include "utl/Logger.h"
 
 namespace eda {
 
 namespace {
+
+// Debug group for netlistgen library verbosity. generateSynthetic and
+// NetlistBuilder are library entry points; their phase markers are debug-gated
+// (group "netlistgen") so in-memory callers stay silent at verbosity 0 while
+// the standalone CLI's default info-level markers narrate the run. See
+// support/logging.h for the level scheme.
+constexpr const char* kGroup = "netlistgen";
 
 // Message ids for netlistgen diagnostics (utl::UKN group; hypergraph uses
 // the 100s, so netlistgen takes the 300s). warn() never throws at the pinned
@@ -214,10 +222,16 @@ bool validateSpecConfig(const SyntheticNetlistSpec& spec, utl::Logger* logger)
   return true;
 }
 
-NetlistBuilder::NetlistBuilder(const std::string& design_name)
+NetlistBuilder::NetlistBuilder(const std::string& design_name,
+                               utl::Logger* logger)
     : design_name_(design_name)
 {
-  logger_ = new utl::Logger();
+  if (logger != nullptr) {
+    logger_ = logger;  // shared; not owned
+  } else {
+    logger_ = new utl::Logger();
+    owns_logger_ = true;
+  }
   db_ = odb::dbDatabase::create();
   db_->setLogger(logger_);
 }
@@ -225,7 +239,9 @@ NetlistBuilder::NetlistBuilder(const std::string& design_name)
 NetlistBuilder::~NetlistBuilder()
 {
   odb::dbDatabase::destroy(db_);
-  delete logger_;
+  if (owns_logger_) {
+    delete logger_;
+  }
 }
 
 void NetlistBuilder::ensureSyntheticTech()
@@ -573,6 +589,7 @@ int formNets(NetlistBuilder& builder,
 
   std::uniform_int_distribution<int> pick_fanout(spec.min_fanout,
                                                  spec.max_fanout);
+  utl::Logger* logger = builder.logger();
   int nets_made = 0;
   while (!drivers.empty() && !sinks.empty()
          && (spec.num_nets < 0 || nets_made < spec.num_nets)) {
@@ -581,11 +598,24 @@ int formNets(NetlistBuilder& builder,
     drivers.pop_back();
 
     const int num_sinks = pick_fanout(rng) - 1;
+    int connected = 0;
     for (int s = 0; s < num_sinks && !sinks.empty(); ++s) {
       sinks.back()->connect(net);
       sinks.pop_back();
+      ++connected;
+    }
+    if (logger != nullptr && nets_made < kTraceCap) {
+      debugPrint(logger, utl::UKN, kGroup, kVerbosityTrace,
+                 "  net n{}: 1 driver + {} sinks{}", nets_made, connected,
+                 nets_made + 1 == kTraceCap ? " (per-net trace capped)" : "");
     }
     ++nets_made;
+    if (logger != nullptr && nets_made % 100000 == 0) {
+      debugPrint(logger, utl::UKN, kGroup, kVerbosityHeartbeat,
+                 "formNets: {} nets formed, {} drivers / {} sinks left",
+                 nets_made, static_cast<int>(drivers.size()),
+                 static_cast<int>(sinks.size()));
+    }
   }
   return nets_made;
 }
@@ -616,9 +646,17 @@ int generateLegacy(NetlistBuilder& builder, const SyntheticNetlistSpec& spec,
 int generateStatistical(NetlistBuilder& builder,
                         const SyntheticNetlistSpec& spec, std::mt19937& rng)
 {
+  utl::Logger* logger = builder.logger();
   GenPlan plan;
   if (!buildPlan(builder, spec, plan)) {
     return -1;
+  }
+  if (logger != nullptr) {
+    debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,
+               "plan: seq_ratio {:.3f}, bucket prob [{:.3f}, {:.3f}, {:.3f}, "
+               "{:.3f}, {:.3f}], seq masters {}",
+               plan.seq_ratio, plan.prob[0], plan.prob[1], plan.prob[2],
+               plan.prob[3], plan.prob[4], static_cast<int>(plan.seq.size()));
   }
 
   std::uniform_real_distribution<double> seq_roll(0.0, 1.0);
@@ -644,15 +682,33 @@ int generateStatistical(NetlistBuilder& builder,
       comb_signal_pins += signalPinCount(master);
     }
     insts.push_back(builder.makeInst(master, "u" + std::to_string(i)));
+    if (logger != nullptr && (i + 1) % 100000 == 0) {
+      debugPrint(logger, utl::UKN, kGroup, kVerbosityHeartbeat,
+                 "instances: {} / {} created", i + 1, spec.num_insts);
+    }
   }
 
   const int nets_made = formNets(builder, insts, spec, rng);
 
   // Post-generation empirical check: logged warning only, never a failure.
-  utl::Logger* logger = builder.logger();
   const double tol = spec.distribution_tolerance_pct;
   const double obs_seq = 100.0 * seq_count / spec.num_insts;
   const double want_seq = 100.0 * plan.seq_ratio;
+
+  // Achieved-vs-requested: warn() below only fires on a tolerance miss; at
+  // verbosity 1 the achieved values are logged unconditionally (see brief §4).
+  if (logger != nullptr) {
+    debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,
+               "achieved: sequential {:.2f}% (target {:.2f}%), bucket shares "
+               "[{}]",
+               obs_seq, want_seq, "see per-bucket detail below");
+    const int comb_dbg = spec.num_insts - seq_count;
+    for (int i = 0; i < kNumCombBuckets && comb_dbg > 0; ++i) {
+      debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,
+                 "  bucket {}: achieved {:.2f}% (target {:.2f}%)", i,
+                 100.0 * bucket_count[i] / comb_dbg, 100.0 * plan.prob[i]);
+    }
+  }
   if (std::abs(obs_seq - want_seq) > tol) {
     logger->warn(utl::UKN, kMsgTolerance,
                  "empirical sequential ratio {:.2f}% deviates from target "
@@ -693,28 +749,52 @@ int generateStatistical(NetlistBuilder& builder,
 int generateSynthetic(NetlistBuilder& builder,
                       const SyntheticNetlistSpec& spec)
 {
-  if (!validateSpecConfig(spec, builder.logger())) {
+  utl::Logger* logger = builder.logger();
+  const bool stat = spec.usesStatisticalMix();
+  if (logger != nullptr) {
+    debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,
+               "generateSynthetic: {} instances, seed {}, fanout [{}, {}], "
+               "mix={}",
+               spec.num_insts, spec.seed, spec.min_fanout, spec.max_fanout,
+               stat ? "statistical" : "legacy");
+  }
+
+  if (!validateSpecConfig(spec, logger)) {
     return -1;
   }
 
   // LEF-backed builders load their tech/cells from the spec's paths before
   // any instance is created.
   if (spec.tech_lef_path.has_value()) {
+    if (logger != nullptr) {
+      debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,
+                 "generateSynthetic: loading LEF (tech {} + {} cell file(s))",
+                 *spec.tech_lef_path,
+                 static_cast<int>(spec.cell_lef_paths.size()));
+    }
     if (!builder.loadLef(*spec.tech_lef_path, spec.cell_lef_paths)) {
       return -1;
     }
   }
 
   std::mt19937 rng(spec.seed);
-  if (!spec.usesStatisticalMix()) {
+  int nets = -1;
+  if (!stat) {
     if (spec.masters.empty()) {
-      builder.logger()->warn(utl::UKN, kMsgNoMode,
-                             "legacy spec has an empty masters list");
+      logger->warn(utl::UKN, kMsgNoMode,
+                   "legacy spec has an empty masters list");
       return -1;
     }
-    return generateLegacy(builder, spec, rng);
+    nets = generateLegacy(builder, spec, rng);
+  } else {
+    nets = generateStatistical(builder, spec, rng);
   }
-  return generateStatistical(builder, spec, rng);
+  if (logger != nullptr && nets >= 0) {
+    debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,
+               "generateSynthetic: done — {} instances, {} nets",
+               spec.num_insts, nets);
+  }
+  return nets;
 }
 
 }  // namespace eda

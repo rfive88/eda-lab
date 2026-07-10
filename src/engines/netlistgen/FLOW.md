@@ -54,7 +54,7 @@ are frozen explicitly. A builder is one path or the other (`tech_ready_`).
 
 ```mermaid
 graph TD
-  ctor["NetlistBuilder(design_name)"] --> dbonly["dbDatabase::create + Logger<br/>(no tech yet)"]
+  ctor["NetlistBuilder(design_name, logger?)"] --> dbonly["dbDatabase::create<br/>Logger: external (shared) or owned<br/>(no tech yet)"]
 
   mm["makeMaster / makeInst / makeNet"] --> est{"tech_ready_?"}
   est -->|no| synth["ensureSyntheticTech():<br/>dbTech + dbLib + dbChip + dbBlock<br/>tech_ready_ = true"]
@@ -282,32 +282,39 @@ JSON is confined to the CLI layer — it never reaches `NetlistBuilder` /
 `SyntheticNetlistSpec` plus CLI-only output paths, enforcing CLI-level rules
 (well-formed JSON, required `instance_count`, ≥1 output path); spec-level rules
 stay with `validateSpecConfig` at generation time. `runCliFromFile` is the one
-pipeline: parse → `generateSynthetic` → `estimateDieArea` →
-`validateAndWrite` → print counts. `validateAndWrite` gates output on
-`validateNetlist`, so a malformed block writes **nothing** (fail-fast). `main()`
-in `netlistgen_cli.cpp` is a thin wrapper over `runCliFromFile`.
+pipeline: create a shared `utl::Logger` (verbosity from the `-verbosity` flag
+via `applyVerbosity`) → parse → `generateSynthetic` (builder shares the logger)
+→ `estimateDieArea` → `validateAndWrite` → log counts. Each step is an `info`
+phase marker; `-verbosity` surfaces the library's `debugPrint` detail through
+the same logger. `validateAndWrite` gates output on `validateNetlist`, so a
+malformed block writes **nothing** (fail-fast). `main()` in `netlistgen_cli.cpp`
+parses the positional config path and the optional `-verbosity <level>` flag,
+then calls `runCliFromFile`.
 
 ```mermaid
 graph TD
-  main["main(argc, argv)"] --> argc{"argc == 2?"}
+  main["main(argc, argv)"] --> scan["scan args: config_path + -verbosity <level>"]
+  scan --> argc{"config_path set?"}
   argc -->|no| usage["print usage; return 1"]
   argc -->|yes| run
 
-  run["runCliFromFile(path, out, err)"] --> rd{"open file?"}
+  run["runCliFromFile(path, err, verbosity)"] --> lg["utl::Logger + applyVerbosity('netlistgen', verbosity)"]
+  lg --> mk1["info: Parsing JSON config"]
+  mk1 --> rd{"open file?"}
   rd -->|no| e1["err; return 1"]
   rd -->|yes| parse["parseCliConfig(text)"]
   parse --> pok{"ok?"}
   pok -->|no| e1
-  pok -->|yes| gen["generateSynthetic(builder, spec)"]
+  pok -->|yes| gen["info: Generating...<br/>generateSynthetic(builder(&logger), spec)"]
   gen --> gok{"nets >= 0?"}
   gok -->|no| e1
-  gok -->|yes| die["estimateDieArea(num_insts)"]
-  die --> vaw["validateAndWrite(builder, config, err)"]
+  gok -->|yes| die["info: Generation complete (counts)<br/>estimateDieArea(num_insts)"]
+  die --> vaw["info: Running validation<br/>validateAndWrite(builder, config, err)"]
   vaw --> valid{"validateNetlist ok?"}
   valid -->|no| e1b["err 'validation failed'<br/>write nothing; return 1"]
-  valid -->|yes| wdef["if output_def_path: writeDef"]
-  wdef --> wodb["if output_odb_path: writeOdb"]
-  wodb --> counts["print instance/net/pin counts"]
+  valid -->|yes| wdef["if output_def_path: writeDef (info: Wrote DEF)"]
+  wdef --> wodb["if output_odb_path: writeOdb (info: Wrote .odb)"]
+  wodb --> counts["info: Done."]
   counts --> ok0["return 0"]
 ```
 

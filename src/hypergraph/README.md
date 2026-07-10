@@ -94,9 +94,17 @@ Semantics:
 Building from a block:
 
 ```cpp
-eda::Hypergraph graph(&logger);   // logger optional, diagnostics only
+eda::Hypergraph graph(&logger);   // logger optional
 graph.buildFromBlock(block);
 ```
+
+The logger, when attached, carries both the plane-conflict / bad-pin
+warnings above and **debug-gated build phase markers** (group
+`"hypergraph"`: instance scan, net scan, CSR transpose, done-with-counts at
+level 1; a capped per-net trace at level 3). These are `debugPrint`, not
+`info`, so an in-memory caller at verbosity 0 sees nothing — a CLI that
+raises the shared logger's verbosity surfaces the build trace. See the
+repo logging convention in `CLAUDE.md` and `src/support/logging.h`.
 
 Iterating topology (vertices on a hyperedge, then edges on a vertex):
 

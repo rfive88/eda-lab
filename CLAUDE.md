@@ -85,9 +85,62 @@ ctest --test-dir build    # or run build/hypergraph_test directly
    pointer — "See FLOW.md for algorithmic flow diagrams." — added as
    directories get their FLOW.md.
 
+## Logging & runtime verbosity (STANDING CONVENTION)
+
+All messages in this repo — human-written or Claude Code-written — go
+through OpenROAD's `utl::Logger`. No custom stdout/stderr message scheme,
+no ad hoc `printf`/`std::cout`/`std::cerr` debug statements. The single
+source of truth for the API and level scheme is `src/support/logging.h`
+(read its header comment before touching logging anywhere).
+
+Confirmed `utl::Logger` API at the pinned SHA (`a3d4865`): severity
+methods `report()`, `info(tool,id,…)`, `warn(tool,id,…)`,
+`error(tool,id,…)` (**throws** `std::runtime_error` — never used here,
+this repo signals failure by return value), `critical(…)` (exits). The
+runtime-verbosity mechanism is the built-in debug tier: the
+`debugPrint(logger, tool, group, level, …)` macro emits only when
+`setDebugLevel(tool, group, L)` was called with `L >= level`. A `Logger`
+writes to a **stdout** colour sink; DEF/`.odb`/Verilog/partition results
+are written to their own file paths, so logging never mixes into
+deterministic data output. (`debugPrint` dereferences its logger
+argument with `->`, so guard a possibly-null logger with an explicit
+`if (logger != nullptr)`, and pass a pointer *variable* — `&value`
+misparses inside the macro.)
+
+The convention:
+
+- **Tool id `utl::UKN`** for every eda-lab message (the pinned `ToolId`
+  enum has no eda-lab tool). `info()`/`warn()` message ids are
+  partitioned so they stay unique across the shared UKN namespace:
+  hypergraph 100–119, fm 120–129, hello_odb 200–209, netlistgen library
+  300–319, netlistgen CLI 320–349. `debug()` takes no id.
+- **One debug group per component** — `"hypergraph"`, `"fm"`,
+  `"netlistgen"`, `"hello_odb"` — so `-verbosity` lifts a whole run.
+- **Every executable takes an optional `-verbosity <level>`** flag
+  (`--verbosity=<level>` too), mapped straight onto `setDebugLevel` via
+  `eda::applyVerbosity()`. Levels: **0** (default) phase markers at the
+  executable layer + final summary + warnings/errors; **1** per-phase
+  detail (counts, achieved-vs-requested stats, library phase markers);
+  **2** progress heartbeats; **3** per-item tracing, capped at
+  `eda::kTraceCap` with an explicit "trace capped" note.
+- **Executable-layer phase markers are `info()`** (default-visible on
+  stdout). **Library/engine phase markers are `debugPrint()`**
+  (debug-gated) so in-memory callers — and existing tests that assert a
+  captured logger sink is empty — stay silent at verbosity 0; a CLI that
+  raises verbosity surfaces the library trace through the shared logger.
+- **Library/engine code threads the logger directly**, not just CLI
+  wrappers: `Hypergraph(utl::Logger*)`, `NetlistBuilder(name, logger*)`
+  (external logger shared, not owned), `FMParams::logger`,
+  `generateSynthetic` via `builder.logger()`.
+
+Additive-only: adding logging must never change a test's results or a
+generated file. Run the eda-lab tests after any logging change.
+
 ## Layout
 
 - `src/dbio/hello_odb.cpp` — LEF/DEF round-trip smoke test against OpenDB.
+- `src/support/logging.h` — the logging/verbosity convention above:
+  confirmed `utl::Logger` API notes, level constants, `applyVerbosity()`.
 - `src/hypergraph/` — hypergraph netlist model (see below).
 - `src/support/ord_shim.cpp` — inert `ord::getLogger`/`ord::OpenRoad::openRoad`
   definitions so links survive when utl.a's Tcl-wrapper objects get pulled in.

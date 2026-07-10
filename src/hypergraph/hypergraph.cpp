@@ -5,9 +5,19 @@
 #include <algorithm>
 
 #include "odb/db.h"
+#include "support/logging.h"
 #include "utl/Logger.h"
 
 namespace eda {
+
+namespace {
+// Debug group for buildFromBlock/buildFromTopology verbosity. These are
+// library entry points with no CLI flag of their own; their phase markers are
+// debug-gated (group "hypergraph"), so an in-memory caller sees nothing at
+// verbosity 0 and a CLI that raises verbosity surfaces the build trace. See
+// support/logging.h for the level scheme.
+constexpr const char* kGroup = "hypergraph";
+}  // namespace
 
 const char* Hypergraph::planeTypeName(const PlaneType type)
 {
@@ -45,6 +55,11 @@ void Hypergraph::buildFromBlock(odb::dbBlock* block)
 {
   clear();
 
+  if (logger_ != nullptr) {
+    debugPrint(logger_, utl::UKN, kGroup, kVerbosityDetail,
+               "buildFromBlock: instance scan");
+  }
+
   // Pass 1: number the vertices before any pin is recorded, so pass 2 can
   // translate an iterm's owning dbInst id to a vertex index immediately.
   for (odb::dbInst* inst : block->getInsts()) {
@@ -52,6 +67,13 @@ void Hypergraph::buildFromBlock(odb::dbBlock* block)
     vertex_index_[id] = num_vertices_;
     vertex_ids_.push_back(id);
     ++num_vertices_;
+  }
+
+  if (logger_ != nullptr) {
+    debugPrint(logger_, utl::UKN, kGroup, kVerbosityDetail,
+               "buildFromBlock: {} vertices numbered; net scan + "
+               "hyperedge-major CSR",
+               num_vertices_);
   }
 
   // Pass 2: stream the hyperedge-major CSR directly — nets arrive in
@@ -69,10 +91,31 @@ void Hypergraph::buildFromBlock(odb::dbBlock* block)
           vertexIndex(odb::dbId<odb::dbInst>(iterm->getInst()->getId())));
     }
     hyperedge_offsets_.push_back(static_cast<int>(pin_list_.size()));
+    if (logger_ != nullptr && num_hyperedges_ < kTraceCap) {
+      const int degree = static_cast<int>(pin_list_.size())
+                         - hyperedge_offsets_[num_hyperedges_];
+      debugPrint(logger_, utl::UKN, kGroup, kVerbosityTrace,
+                 "  net[{}] '{}' -> {} pins{}", num_hyperedges_, net->getName(),
+                 degree,
+                 num_hyperedges_ + 1 == kTraceCap ? " (per-net trace capped)"
+                                                  : "");
+    }
     ++num_hyperedges_;
   }
 
+  if (logger_ != nullptr) {
+    debugPrint(logger_, utl::UKN, kGroup, kVerbosityDetail,
+               "buildFromBlock: {} hyperedges, {} pins; transposing to "
+               "vertex-major CSR",
+               num_hyperedges_, static_cast<int>(pin_list_.size()));
+  }
   buildVertexMajor();
+  if (logger_ != nullptr) {
+    debugPrint(logger_, utl::UKN, kGroup, kVerbosityDetail,
+               "buildFromBlock: done ({} vertices, {} hyperedges, {} pins)",
+               num_vertices_, num_hyperedges_,
+               static_cast<int>(pin_list_.size()));
+  }
 }
 
 void Hypergraph::buildFromTopology(
@@ -85,6 +128,13 @@ void Hypergraph::buildFromTopology(
   // No dbBlock here, so vertex_ids_/hyperedge_ids_ and the reverse maps
   // stay empty on purpose — that emptiness is what makes every dbId lookup
   // fail soft in procedural mode (see vertexId()/hyperedgeId()).
+  if (logger_ != nullptr) {
+    debugPrint(logger_, utl::UKN, kGroup, kVerbosityDetail,
+               "buildFromTopology: {} vertices, {} hyperedges from explicit "
+               "topology",
+               num_vertices_, static_cast<int>(hyperedges.size()));
+  }
+
   hyperedge_offsets_.push_back(0);
   for (const std::vector<int>& edge : hyperedges) {
     for (const int v : edge) {
@@ -109,6 +159,12 @@ void Hypergraph::buildFromTopology(
   }
 
   buildVertexMajor();
+  if (logger_ != nullptr) {
+    debugPrint(logger_, utl::UKN, kGroup, kVerbosityDetail,
+               "buildFromTopology: done ({} vertices, {} hyperedges, {} pins)",
+               num_vertices_, num_hyperedges_,
+               static_cast<int>(pin_list_.size()));
+  }
 }
 
 // Pass 3: transpose into the vertex-major CSR with a counting sort

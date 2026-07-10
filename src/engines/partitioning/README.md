@@ -91,12 +91,23 @@ expected to be positive; the engine does not sanitize them.
 | `max_passes` | `int` | `10` | outer FM passes; stops early on a non-improving pass |
 | `seed` | `unsigned` | `1` | seeds the random initial partition and all tie-breaking |
 | `initial` | `InitialPartition` | `kRandom` | `kRandom`: seeded balanced random split (random visit order, greedy lightest-part placement, ties to the smallest part index). `kProvided`: take `partitionFM`'s `initial_partition` argument (must be `numVertices()` entries in `[0, num_parts)`; anything else falls back to `kRandom` with a UKN-0102 warning). |
-| `logger` | `utl::Logger*` | `nullptr` | optional; debug-level trace only (tool `UKN`, debug group `"fm"`) plus the UKN-0102 warning above |
+| `logger` | `utl::Logger*` | `nullptr` | optional; **all trace is debug-gated** (tool `UKN`, debug group `"fm"`), plus the UKN-0102 warning above. Nothing prints unless a caller both passes a logger and raises its debug level (see verbosity note below). |
 
 `FMResult`: `partition` (local vertex index → part in `[0, K)`),
 `cut_cost` (final connectivity-1 cost, recomputed from scratch at
 return), `passes_run`, `balanced` (whether the final solution meets the
 balance constraint).
+
+### Logging & verbosity
+
+`partitionFM` is a pure library with no `-verbosity` flag of its own; its
+optional `logger` is threaded so a CLI/test caller that raises the logger's
+debug level (via `Logger::setDebugLevel` or `eda::applyVerbosity`, group
+`"fm"`) sees FM's trace. Everything is `debugPrint`, so at level 0 (or a null
+logger) FM stays silent — preserving the "nothing prints" contract. Tiers
+(see `src/support/logging.h`): **1** — run setup (n/m/K/tolerance/bounds),
+per-pass cut deltas, convergence/final; **2** — reserved; **3** — per-move
+gains, capped at `eda::kTraceCap` with an explicit "trace capped" note.
 
 ## Random hypergraph generator
 

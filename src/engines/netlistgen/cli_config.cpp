@@ -11,6 +11,8 @@
 #include "engines/netlistgen/netlist_validation.h"
 #include "engines/netlistgen/netlist_writers.h"
 #include "odb/db.h"
+#include "support/logging.h"
+#include "utl/Logger.h"
 
 namespace eda {
 
@@ -22,6 +24,20 @@ namespace {
 // order. Kept parallel to kNumCombBuckets / kSyntheticBucketAnchors.
 constexpr std::array<const char*, kNumCombBuckets> kBucketKeys = {"2", "3", "4",
                                                                   "5", "6+"};
+
+// CLI-layer info phase-marker ids (utl::UKN; see support/logging.h). These are
+// the default-visible narrative of a CLI run; library internals stay silent
+// unless -verbosity raises the shared logger's debug level.
+constexpr const char* kGroup = "netlistgen";
+constexpr int kMsgParsing = 320;
+constexpr int kMsgParsed = 321;
+constexpr int kMsgGenerating = 322;
+constexpr int kMsgGenerated = 323;
+constexpr int kMsgValidating = 324;
+constexpr int kMsgValidated = 325;
+constexpr int kMsgWroteDef = 326;
+constexpr int kMsgWroteOdb = 327;
+constexpr int kMsgDone = 328;
 
 }  // namespace
 
@@ -160,9 +176,16 @@ bool validateAndWrite(NetlistBuilder& builder,
 }
 
 int runCliFromFile(const std::string& config_path,
-                   std::ostream& out,
-                   std::ostream& err)
+                   std::ostream& err,
+                   int verbosity)
 {
+  // One logger for the whole run: the CLI's info phase markers and the library
+  // engine (via NetlistBuilder) share it, so -verbosity lifts detail
+  // everywhere at once. See support/logging.h.
+  utl::Logger logger;
+  applyVerbosity(&logger, kGroup, verbosity);
+
+  logger.info(utl::UKN, kMsgParsing, "Parsing JSON config: {}", config_path);
   std::ifstream file(config_path);
   if (!file) {
     err << "cannot open config file: " << config_path << "\n";
@@ -177,19 +200,15 @@ int runCliFromFile(const std::string& config_path,
     err << "config error: " << error << "\n";
     return 1;
   }
+  logger.info(utl::UKN, kMsgParsed,
+              "Config parsed: {} instances requested", config.spec.num_insts);
 
-  NetlistBuilder builder;
+  NetlistBuilder builder("synth", &logger);
+  logger.info(utl::UKN, kMsgGenerating, "Generating netlist: {} instances...",
+              config.spec.num_insts);
   const int nets = generateSynthetic(builder, config.spec);
   if (nets < 0) {
     err << "generation failed: spec rejected (see logged diagnostics)\n";
-    return 1;
-  }
-
-  // Auto-size the die area so the DEF carries a valid DIEAREA (nominal pitch in
-  // synthetic mode, loaded site pitch in LEF mode). Instances stay UNPLACED.
-  builder.estimateDieArea(config.spec.num_insts);
-
-  if (!validateAndWrite(builder, config, err)) {
     return 1;
   }
 
@@ -198,15 +217,29 @@ int runCliFromFile(const std::string& config_path,
   for (odb::dbInst* inst : block->getInsts()) {
     pins += inst->getITerms().size();
   }
-  out << "netlistgen: generated " << block->getInsts().size()
-      << " instances, " << block->getNets().size() << " nets, " << pins
-      << " pins\n";
+  logger.info(utl::UKN, kMsgGenerated,
+              "Generation complete: {} instances, {} nets, {} pins",
+              block->getInsts().size(), block->getNets().size(), pins);
+
+  // Auto-size the die area so the DEF carries a valid DIEAREA (nominal pitch in
+  // synthetic mode, loaded site pitch in LEF mode). Instances stay UNPLACED.
+  builder.estimateDieArea(config.spec.num_insts);
+
+  logger.info(utl::UKN, kMsgValidating, "Running well-formedness validation...");
+  if (!validateAndWrite(builder, config, err)) {
+    return 1;
+  }
+  logger.info(utl::UKN, kMsgValidated, "Well-formedness validation passed.");
+
   if (config.output_def_path.has_value()) {
-    out << "  wrote DEF: " << *config.output_def_path << "\n";
+    logger.info(utl::UKN, kMsgWroteDef, "Wrote DEF: {}",
+                *config.output_def_path);
   }
   if (config.output_odb_path.has_value()) {
-    out << "  wrote .odb: " << *config.output_odb_path << "\n";
+    logger.info(utl::UKN, kMsgWroteOdb, "Wrote .odb: {}",
+                *config.output_odb_path);
   }
+  logger.info(utl::UKN, kMsgDone, "Done.");
   return 0;
 }
 

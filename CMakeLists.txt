@@ -11,6 +11,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_subdirectory(third_party/openroad EXCLUDE_FROM_ALL)
 
 add_executable(hello_odb src/dbio/hello_odb.cpp)
+target_include_directories(hello_odb PRIVATE src)
 target_link_libraries(hello_odb PRIVATE odb utl)
 
 add_library(hypergraph src/hypergraph/hypergraph.cpp)

@@ -162,7 +162,7 @@ generates through the **same** `generateSynthetic` in-memory callers use,
 validates well-formedness, and writes the requested outputs:
 
 ```bash
-build/netlistgen_cli path/to/config.json
+build/netlistgen_cli path/to/config.json [-verbosity <level>]
 ```
 
 **JSON is an input to this executable only** — it is not part of the in-memory
@@ -193,9 +193,10 @@ independently optional — whichever are set are written, the rest skipped — b
 config: the mix is fully determined by `sequential_ratio` plus exactly one of
 `combinational_pin_distribution` or `target_avg_fanout`. With no LEF fields,
 generation is synthetic-only and the DEF's `DIEAREA` is auto-sized via the
-nominal pitch. On success the CLI prints instance / net / pin counts to stdout.
-JSON is parsed with **`nlohmann::json`** (header-only, pulled via CMake
-`FetchContent` pinned to `v3.11.3`).
+nominal pitch. On success the CLI logs instance / net / pin counts (all output
+is `utl::Logger`, see "Logging & verbosity" below). JSON is parsed with
+**`nlohmann::json`** (header-only, pulled via CMake `FetchContent` pinned to
+`v3.11.3`).
 
 Mode A example (explicit distribution, LEF-backed, both outputs):
 
@@ -229,6 +230,25 @@ Mode B example (target average fanout, synthetic-only, DEF-only):
 
 Per the run-outputs convention, point `output_*_path` under `run/` (or a temp
 path) — never the repo root or source tree.
+
+## Logging & verbosity
+
+All output is `utl::Logger` (repo convention — see `CLAUDE.md` /
+`src/support/logging.h`). The CLI narrates the run with default-visible `info`
+phase markers (parse config → generate → validate → write → done) and a final
+count summary; hard errors go to stderr. `-verbosity <level>` (group
+`"netlistgen"`) raises detail across the whole run: **1** adds the resolved
+plan (bucket probabilities, sequential masters) and achieved-vs-requested
+statistics unconditionally (not just on a tolerance miss); **2** adds
+instance/net progress heartbeats every 100k; **3** adds a per-net formation
+trace, capped at `eda::kTraceCap`.
+
+The library threads the logger so in-memory callers get the same trace:
+`NetlistBuilder(name, logger*)` takes an **optional external logger** (shared,
+not owned; a null logger makes the builder own a fresh one as before), and
+`generateSynthetic` logs through `builder.logger()`. Its phase markers are
+`debugPrint` (debug-gated), so an in-memory caller is silent at verbosity 0
+until it calls `setDebugLevel` (or `eda::applyVerbosity`) on the shared logger.
 
 ## Input / output contract
 

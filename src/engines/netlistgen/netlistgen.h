@@ -62,7 +62,14 @@ inline constexpr std::array<double, kNumCombBuckets> kSyntheticBucketAnchors =
 class NetlistBuilder
 {
  public:
-  explicit NetlistBuilder(const std::string& design_name = "synth");
+  // A null `logger` (the default) makes the builder own a fresh utl::Logger;
+  // pass a non-null one to share a logger with the caller (e.g. a CLI that set
+  // its debug verbosity) — an external logger is used but never deleted. The
+  // logger is threaded to generateSynthetic and the odb readers/writers so
+  // library callers get the same debuggability the CLI does (see
+  // support/logging.h; netlistgen debug group "netlistgen").
+  explicit NetlistBuilder(const std::string& design_name = "synth",
+                          utl::Logger* logger = nullptr);
   ~NetlistBuilder();
 
   NetlistBuilder(const NetlistBuilder&) = delete;
@@ -116,6 +123,7 @@ class NetlistBuilder
 
   std::string design_name_;
   utl::Logger* logger_ = nullptr;
+  bool owns_logger_ = false;  // true iff the ctor allocated logger_
   odb::dbDatabase* db_ = nullptr;
   odb::dbBlock* block_ = nullptr;
   bool tech_ready_ = false;  // synthetic or LEF tech/lib/chip/block created

@@ -13,7 +13,8 @@
       "extensions": [
         "ms-vscode.cpptools",
         "llvm-vs-code-extensions.vscode-clangd",
-        "ms-python.python"
+        "ms-python.python",
+	"mhutchie.git-graph"
       ]
     }
   },

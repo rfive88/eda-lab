@@ -43,3 +43,10 @@ Example: `netlistgen_cli config.json -verbosity 2`. Logging goes to
 stdout; it never mixes into the deterministic data output files
 (DEF/`.odb`). See `CLAUDE.md` and `src/support/logging.h` for the full
 convention.
+
+Every CLI also follows a consistent `--help`/usage convention: `--help`
+(or `-h`) lists each option with a one-line description and exits 0; a
+missing required argument prints the same usage block and exits nonzero.
+Per-option detail (defaults, ranges, examples) lives in each engine's own
+README under "Command-Line Options"; the shared renderer is
+`src/support/cli.h`.

@@ -7,7 +7,7 @@ GTest suites for eda-lab.
 ```bash
 cmake -B build              # Debug tree; build-release/ is the Release tree
 cmake --build build
-ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_stageb_test|netlistgen_stagec_test|netlistgen_link_smoke|fm_partitioner_test" --output-on-failure
+ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_stageb_test|netlistgen_stagec_test|netlistgen_link_smoke|fm_partitioner_test|cli_help_test" --output-on-failure
 ```
 
 The `-R` filter matters: a bare `ctest` also picks up the vendored OpenROAD
@@ -75,6 +75,14 @@ cd run
   (`target_link_libraries(... PRIVATE netlistgen odb utl)`, sources not
   compiled in) and calls `generateSynthetic`; returns non-zero on failure.
   Fails to link if `netlistgen` ever stops being a real library target.
+- `cli_help_test.cpp` — the repo CLI `--help`/usage convention
+  (`src/support/cli.h`), no data files needed. Unit-tests the shared renderer
+  (every option's one-line description appears in both `--help` and the
+  missing-argument block — the single-source-of-truth guarantee), then spawns
+  both `hello_odb` and `netlistgen_cli` (paths compiled in via `HELLO_ODB_BIN`
+  / `NETLISTGEN_CLI_BIN`; `add_dependencies` builds them first) to confirm
+  `--help` exits 0 and lists the options while a missing required argument
+  exits nonzero repeating the same descriptions.
 - `fm_partitioner_test.cpp` — the Stage 1–2 partitioning engine
   (`src/engines/partitioning/`): flat K-way FM minimizing weighted
   connectivity-1. Reported costs are cross-checked against independent

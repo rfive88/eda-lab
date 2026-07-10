@@ -12,6 +12,15 @@ over `Logger::setDebugLevel` that maps a `-verbosity <level>` flag onto the
 logger's built-in debug tier. Every CLI and every engine includes it via
 `"support/logging.h"`.
 
+`cli.h` is the single source of truth for the CLI `--help`/usage convention
+(see "CLI `--help` / usage" in `CLAUDE.md`). Also header-only: a `CliSpec` of
+`CliOption`s (each carrying one one-line `description`) plus
+`printHelp`/`printUsageError`/`wantsHelp`, so every CLI renders both its
+`--help` output and its missing-argument error from the same registered option
+list. `verbosityOption()` supplies the shared `-verbosity` wording. Used by
+`hello_odb` and `netlistgen_cli`; `test/cli_help_test.cpp` enforces the
+single-source-of-truth guarantee.
+
 `ord_shim.cpp` provides inert definitions of `ord::getLogger()` and
 `ord::OpenRoad::openRoad()` (both return `nullptr`). Some `utl.a` members
 (the swig/Tcl wrappers, LoggerCommon) reference these

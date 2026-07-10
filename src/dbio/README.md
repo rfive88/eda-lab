@@ -26,11 +26,20 @@ cd run
                    ../data/gcd_nangate45.def
 ```
 
-Argument order is tech LEF, cell LEF, DEF — exiting with usage help when the
-three positional paths are not all present. The optional `-verbosity <level>`
-flag (`--verbosity=<level>` too) raises debug verbosity; unset = the `info`
-phase markers above. Level 1 adds the block's DBU/micron as a debug line (see
-the repo logging convention in `CLAUDE.md`).
+## Command-Line Options
+
+Per the repo CLI `--help`/usage convention (`CLAUDE.md`, `src/support/cli.h`).
+`--help`/`-h` prints this list and exits 0; a missing positional prints the
+same block to stderr and exits nonzero.
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `<tech_lef>` | yes | Technology LEF file, loaded first (`lefin::createTechAndLib`). |
+| `<cell_lef>` | yes | Cell library LEF file, loaded against that tech (`lefin::createLib`). |
+| `<def>` | yes | DEF file read into a pre-created chip/block (`defin::readChip`). |
+| `-verbosity <level>` | no | Debug verbosity (`--verbosity=<level>` too); unset/0 = the `info` phase markers above. Level 1 adds the block's DBU/micron as a debug line. See the logging convention in `CLAUDE.md`. |
+
+Argument order is tech LEF, cell LEF, DEF.
 
 ## ODB API notes at the pinned SHA (`a3d4865`)
 

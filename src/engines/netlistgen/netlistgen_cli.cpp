@@ -22,9 +22,21 @@
 #include <string>
 
 #include "engines/netlistgen/cli_config.h"
+#include "support/cli.h"
 
 int main(int argc, char** argv)
 {
+  const eda::CliSpec spec{
+      argv[0],
+      "Generate a synthetic netlist from a JSON config; write DEF / .odb.",
+      {{"<config.json>", "", true,
+        "JSON generation config (schema in the netlistgen README)."},
+       eda::verbosityOption()}};
+  if (eda::wantsHelp(argc, argv)) {
+    eda::printHelp(std::cout, spec);
+    return 0;
+  }
+
   const char* config_path = nullptr;
   int verbosity = 0;
   for (int i = 1; i < argc; ++i) {
@@ -40,7 +52,8 @@ int main(int argc, char** argv)
     }
   }
   if (config_path == nullptr) {
-    std::cerr << "Usage: " << argv[0] << " <config.json> [-verbosity <level>]\n";
+    eda::printUsageError(std::cerr, spec,
+                         "missing required argument <config.json>");
     return 1;
   }
   return eda::runCliFromFile(config_path, std::cerr, verbosity);

@@ -2,6 +2,7 @@
 #include "odb/lefin.h"
 #include "odb/defin.h"
 #include "odb/defout.h"
+#include "support/cli.h"
 #include "support/logging.h"
 #include "utl/Logger.h"
 
@@ -28,6 +29,18 @@ constexpr int kMsgReadFail = 207;
 int main(int argc, char** argv) {
   // Positional: <tech_lef> <cell_lef> <def>. Optional: -verbosity <level>
   // (or --verbosity=<level>) — repo-wide debug verbosity, see support/logging.h.
+  const eda::CliSpec spec{
+      argv[0],
+      "LEF/DEF round-trip smoke test against OpenDB.",
+      {{"<tech_lef>", "", true, "Technology LEF file (loaded first)."},
+       {"<cell_lef>", "", true, "Cell library LEF file (cells against the tech)."},
+       {"<def>", "", true, "DEF file to read into a chip/block."},
+       eda::verbosityOption()}};
+  if (eda::wantsHelp(argc, argv)) {
+    eda::printHelp(std::cout, spec);
+    return 0;
+  }
+
   std::vector<const char*> pos;
   int verbosity = eda::kVerbosityDefault;
   for (int i = 1; i < argc; ++i) {
@@ -42,9 +55,13 @@ int main(int argc, char** argv) {
       pos.push_back(argv[i]);
     }
   }
+  static const char* const kPositionals[] = {"<tech_lef>", "<cell_lef>", "<def>"};
   if (pos.size() != 3) {
-    std::cerr << "Usage: " << argv[0]
-              << " <tech_lef> <cell_lef> <def> [-verbosity <level>]\n";
+    const std::string problem =
+        pos.size() < 3
+            ? "missing required argument " + std::string(kPositionals[pos.size()])
+            : "too many positional arguments";
+    eda::printUsageError(std::cerr, spec, problem);
     return 1;
   }
 

@@ -103,6 +103,17 @@ target_link_libraries(fm_partitioner_test PRIVATE partitioning hypergraph odb
                                                   utl GTest::gtest
                                                   GTest::gtest_main)
 
+# CLI --help / usage convention: unit-tests support/cli.h and spawns both CLI
+# binaries to confirm --help (exit 0) and missing-argument (exit nonzero) share
+# one option-description source. Header-only helper — no odb/utl link needed.
+add_executable(cli_help_test test/cli_help_test.cpp)
+target_include_directories(cli_help_test PRIVATE src)
+target_compile_definitions(cli_help_test
+                           PRIVATE HELLO_ODB_BIN="$<TARGET_FILE:hello_odb>"
+                                   NETLISTGEN_CLI_BIN="$<TARGET_FILE:netlistgen_cli>")
+target_link_libraries(cli_help_test PRIVATE GTest::gtest GTest::gtest_main)
+add_dependencies(cli_help_test hello_odb netlistgen_cli)
+
 include(GoogleTest)
 add_test(NAME hypergraph_test COMMAND hypergraph_test)
 add_test(NAME netlistgen_test COMMAND netlistgen_test)
@@ -110,3 +121,4 @@ add_test(NAME netlistgen_stageb_test COMMAND netlistgen_stageb_test)
 add_test(NAME netlistgen_link_smoke COMMAND netlistgen_link_smoke)
 add_test(NAME netlistgen_stagec_test COMMAND netlistgen_stagec_test)
 add_test(NAME fm_partitioner_test COMMAND fm_partitioner_test)
+add_test(NAME cli_help_test COMMAND cli_help_test)

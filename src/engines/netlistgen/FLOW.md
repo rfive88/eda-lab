@@ -293,9 +293,11 @@ then calls `runCliFromFile`.
 
 ```mermaid
 graph TD
-  main["main(argc, argv)"] --> scan["scan args: config_path + -verbosity <level>"]
+  main["main(argc, argv)"] --> help{"wantsHelp (-h/--help)?"}
+  help -->|yes| ph["printHelp(stdout, CliSpec); return 0"]
+  help -->|no| scan["scan args: config_path + -verbosity <level>"]
   scan --> argc{"config_path set?"}
-  argc -->|no| usage["print usage; return 1"]
+  argc -->|no| usage["printUsageError(stderr, CliSpec,<br/>'missing required argument'); return 1"]
   argc -->|yes| run
 
   run["runCliFromFile(path, err, verbosity)"] --> lg["utl::Logger + applyVerbosity('netlistgen', verbosity)"]

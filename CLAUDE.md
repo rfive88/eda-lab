@@ -136,11 +136,52 @@ The convention:
 Additive-only: adding logging must never change a test's results or a
 generated file. Run the eda-lab tests after any logging change.
 
+## CLI `--help` / usage (STANDING CONVENTION)
+
+Every standalone CLI exposes `--help`/`-h` and, on a missing required
+argument, prints a usage/error block — both rendered from **one**
+registered option list so each option's one-line description is written
+exactly once in code and cannot drift between the two paths.
+
+**Mechanism — Option B, a small internal header (`src/support/cli.h`),
+not a CLI-parsing library.** Rationale: the repo's CLIs are trivial
+(≤ 4 argv-level options), and the load-bearing requirement — the *same*
+one-line description appears in both `--help` and the missing-argument
+error — is exactly what general CLI libraries (CLI11 etc.) don't give
+out of the box (they print a generic error on missing required args). A
+~120-line header yields precisely that behaviour with no new dependency.
+Each CLI builds an `eda::CliSpec { program, summary, vector<CliOption> }`
+(one `CliOption` = `name`, `metavar`, `required`, one-line `description`)
+and calls `eda::wantsHelp` / `printHelp` / `printUsageError`.
+
+Rules:
+
+- The one-line description lives **once** in the `CliSpec`; `printHelp`
+  and `printUsageError` both render from it. `eda::verbosityOption()`
+  provides the shared `-verbosity` wording so it is identical across every
+  CLI, not just within one file.
+- `--help`/`-h` prints to stdout and exits **0**, regardless of what other
+  args were supplied. A missing required argument prints to stderr (naming
+  the offending option), exits **nonzero**, and points at `--help`.
+- The CLI stays terse: only one-line descriptions. Depth (defaults, ranges,
+  interactions, examples) lives in the engine's `README.md`
+  "Command-Line Options" section — **not** printed by the CLI. This
+  convention covers argv-level options only; JSON config-field validation
+  keeps its own fail-fast path (see netlistgen `cli_config`).
+
+Additive-only, same as the logging convention: `--help`/usage output is
+new, valid invocations are unchanged. `test/cli_help_test.cpp` enforces
+the single-source-of-truth guarantee (unit-tests the renderer and spawns
+both CLIs). There is no partitioner CLI yet (library/test-only); when one
+is added it uses this helper from the start.
+
 ## Layout
 
 - `src/dbio/hello_odb.cpp` — LEF/DEF round-trip smoke test against OpenDB.
 - `src/support/logging.h` — the logging/verbosity convention above:
   confirmed `utl::Logger` API notes, level constants, `applyVerbosity()`.
+- `src/support/cli.h` — the CLI `--help`/usage convention above: `CliSpec`,
+  `CliOption`, `printHelp`/`printUsageError`/`wantsHelp`, `verbosityOption()`.
 - `src/hypergraph/` — hypergraph netlist model (see below).
 - `src/support/ord_shim.cpp` — inert `ord::getLogger`/`ord::OpenRoad::openRoad`
   definitions so links survive when utl.a's Tcl-wrapper objects get pulled in.

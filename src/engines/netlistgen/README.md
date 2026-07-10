@@ -165,6 +165,19 @@ validates well-formedness, and writes the requested outputs:
 build/netlistgen_cli path/to/config.json [-verbosity <level>]
 ```
 
+### Command-Line Options
+
+The **argv-level** options (distinct from the JSON config *fields* documented
+under "Standalone CLI" below — those are validated separately). Per the repo
+CLI `--help`/usage convention (`CLAUDE.md`, `src/support/cli.h`): `--help`/`-h`
+lists these and exits 0; a missing `<config.json>` prints the same block to
+stderr and exits nonzero.
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `<config.json>` | yes | Path to the JSON generation config; its schema is the "JSON config schema" table below. |
+| `-verbosity <level>` | no | Debug verbosity (`--verbosity=<level>` too); unset/0 = default `info` phase markers. Levels 1–3 add plan detail, heartbeats, and per-net trace — see "Logging & verbosity". |
+
 **JSON is an input to this executable only** — it is not part of the in-memory
 API. The in-memory path (`NetlistBuilder` + `generateSynthetic`) is driven by
 constructing a `SyntheticNetlistSpec` in C++; JSON parsing lives in the

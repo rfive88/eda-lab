@@ -3,23 +3,223 @@
 #include "engines/netlistgen/netlistgen.h"
 
 #include <algorithm>
+#include <cmath>
 #include <random>
 
 #include "odb/db.h"
+#include "odb/geom.h"
+#include "odb/lefin.h"
 #include "utl/Logger.h"
 
 namespace eda {
 
+namespace {
+
+// Message ids for netlistgen diagnostics (utl::UKN group; hypergraph uses
+// the 100s, so netlistgen takes the 300s). warn() never throws at the pinned
+// SHA — Logger::error() does, and this engine signals failure by return value.
+constexpr int kMsgBothModes = 300;
+constexpr int kMsgNoMode = 301;
+constexpr int kMsgDistSum = 302;
+constexpr int kMsgSeqRatio = 303;
+constexpr int kMsgTargetRange = 304;
+constexpr int kMsgEmptyBucket = 305;
+constexpr int kMsgEmptySeq = 306;
+constexpr int kMsgExcludeMaster = 307;
+constexpr int kMsgDerivedDist = 308;
+constexpr int kMsgTolerance = 309;
+constexpr int kMsgLefLoad = 310;
+constexpr int kMsgNoLefMasters = 311;
+
+// Bucket 0..4 for a signal-pin count: 2->0, 3->1, 4->2, 5->3, >=6->4.
+// Anything below 2 (tie/fill/antenna cells) belongs to no bucket.
+int bucketIndex(int signal_pins)
+{
+  if (signal_pins < 2) {
+    return -1;
+  }
+  if (signal_pins >= 6) {
+    return kNumCombBuckets - 1;
+  }
+  return signal_pins - 2;
+}
+
+// Count of OUTPUT-direction signal pins (a combinational cell must have
+// exactly one). CLOCK counts as signal, POWER/GROUND never do.
+int signalOutputCount(odb::dbMaster* master)
+{
+  int outs = 0;
+  for (odb::dbMTerm* mterm : master->getMTerms()) {
+    const odb::dbSigType st = mterm->getSigType();
+    if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
+      continue;
+    }
+    if (mterm->getIoType() == odb::dbIoType::OUTPUT) {
+      ++outs;
+    }
+  }
+  return outs;
+}
+
+double meanOfTilt(const std::array<double, kNumCombBuckets>& anchors,
+                  double theta)
+{
+  // Numerically stable softmax-weighted mean: subtract the max exponent.
+  double amax = *std::max_element(anchors.begin(), anchors.end());
+  double z = 0.0;
+  double num = 0.0;
+  for (double a : anchors) {
+    const double w = std::exp(theta * (a - amax));
+    z += w;
+    num += w * a;
+  }
+  return num / z;
+}
+
+}  // namespace
+
+int signalPinCount(odb::dbMaster* master)
+{
+  int pins = 0;
+  for (odb::dbMTerm* mterm : master->getMTerms()) {
+    const odb::dbSigType st = mterm->getSigType();
+    if (st == odb::dbSigType::SIGNAL || st == odb::dbSigType::CLOCK) {
+      ++pins;
+    }
+  }
+  return pins;
+}
+
+bool isSequentialMaster(odb::dbMaster* master)
+{
+  for (odb::dbMTerm* mterm : master->getMTerms()) {
+    if (mterm->getSigType() == odb::dbSigType::CLOCK) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::array<double, kNumCombBuckets> maxEntropyDistribution(
+    const std::array<double, kNumCombBuckets>& anchors,
+    double target_mean)
+{
+  // mean(theta) is monotonically increasing in theta from min(anchors)
+  // (theta -> -inf) to max(anchors) (theta -> +inf); bisect for the theta
+  // that hits target_mean.
+  double lo = -50.0;
+  double hi = 50.0;
+  for (int it = 0; it < 200; ++it) {
+    const double mid = 0.5 * (lo + hi);
+    if (meanOfTilt(anchors, mid) < target_mean) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  const double theta = 0.5 * (lo + hi);
+
+  const double amax = *std::max_element(anchors.begin(), anchors.end());
+  std::array<double, kNumCombBuckets> p{};
+  double z = 0.0;
+  for (int i = 0; i < kNumCombBuckets; ++i) {
+    p[i] = std::exp(theta * (anchors[i] - amax));
+    z += p[i];
+  }
+  for (double& v : p) {
+    v /= z;
+  }
+  return p;
+}
+
+bool validateSpecConfig(const SyntheticNetlistSpec& spec, utl::Logger* logger)
+{
+  if (spec.num_insts <= 0) {
+    if (logger) {
+      logger->warn(utl::UKN, kMsgNoMode, "num_insts must be > 0");
+    }
+    return false;
+  }
+  if (!spec.usesStatisticalMix()) {
+    // Legacy weighted mix: generateSynthetic checks masters non-emptiness.
+    return true;
+  }
+
+  const bool has_dist = spec.combinational_pin_distribution.has_value();
+  const bool has_target = spec.target_avg_fanout.has_value();
+  if (has_dist && has_target) {
+    if (logger) {
+      logger->warn(utl::UKN, kMsgBothModes,
+                   "both combinational_pin_distribution and "
+                   "target_avg_fanout are set; exactly one is allowed");
+    }
+    return false;
+  }
+  if (!has_dist && !has_target) {
+    if (logger) {
+      logger->warn(utl::UKN, kMsgNoMode,
+                   "statistical mix engaged but neither "
+                   "combinational_pin_distribution nor target_avg_fanout "
+                   "is set");
+    }
+    return false;
+  }
+
+  const double seq_ratio = spec.sequential_ratio.value_or(0.0);
+  if (seq_ratio < 0.0 || seq_ratio > 1.0) {
+    if (logger) {
+      logger->warn(utl::UKN, kMsgSeqRatio,
+                   "sequential_ratio must be in [0, 1], got {}", seq_ratio);
+    }
+    return false;
+  }
+
+  if (has_dist) {
+    double sum = 0.0;
+    for (double v : *spec.combinational_pin_distribution) {
+      if (v < 0.0) {
+        if (logger) {
+          logger->warn(utl::UKN, kMsgDistSum,
+                       "combinational_pin_distribution has a negative "
+                       "bucket weight");
+        }
+        return false;
+      }
+      sum += v;
+    }
+    if (std::abs(sum - 100.0) > 1e-6) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgDistSum,
+                     "combinational_pin_distribution must sum to 100, got {}",
+                     sum);
+      }
+      return false;
+    }
+  } else {
+    // Mode B synthetic-anchor range check. In LEF mode the range is
+    // re-checked against measured anchors during plan building.
+    const double t = *spec.target_avg_fanout;
+    const double lo = kSyntheticBucketAnchors.front();
+    const double hi = kSyntheticBucketAnchors.back();
+    if (!spec.tech_lef_path.has_value() && (t <= lo || t >= hi)) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgTargetRange,
+                     "target_avg_fanout must be strictly inside ({}, {}), "
+                     "got {}",
+                     lo, hi, t);
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
 NetlistBuilder::NetlistBuilder(const std::string& design_name)
+    : design_name_(design_name)
 {
   logger_ = new utl::Logger();
   db_ = odb::dbDatabase::create();
   db_->setLogger(logger_);
-
-  odb::dbTech* tech = odb::dbTech::create(db_, "tech");
-  odb::dbLib::create(db_, "lib", tech);
-  odb::dbChip* chip = odb::dbChip::create(db_, tech);
-  block_ = odb::dbBlock::create(chip, design_name.c_str());
 }
 
 NetlistBuilder::~NetlistBuilder()
@@ -28,10 +228,75 @@ NetlistBuilder::~NetlistBuilder()
   delete logger_;
 }
 
+void NetlistBuilder::ensureSyntheticTech()
+{
+  if (tech_ready_) {
+    return;
+  }
+  odb::dbTech* tech = odb::dbTech::create(db_, "tech");
+  odb::dbLib::create(db_, "lib", tech);
+  odb::dbChip* chip = odb::dbChip::create(db_, tech);
+  block_ = odb::dbBlock::create(chip, design_name_.c_str());
+  tech_ready_ = true;
+}
+
+bool NetlistBuilder::loadLef(const std::string& tech_lef_path,
+                             const std::vector<std::string>& cell_lef_paths)
+{
+  if (tech_ready_) {
+    logger_->warn(utl::UKN, kMsgLefLoad,
+                  "loadLef called on an already-initialised builder");
+    return false;
+  }
+  // createTechAndLib is a 3-arg call (tech_name, lib_name, lef_file); the
+  // tech LEF doubles as the source of any macros it happens to define.
+  odb::lefin reader(db_, logger_, /*ignore_non_routing_layers=*/false);
+  odb::dbLib* tech_lib =
+      reader.createTechAndLib("tech", "tech_lib", tech_lef_path.c_str());
+  if (tech_lib == nullptr) {
+    logger_->warn(utl::UKN, kMsgLefLoad, "failed to load tech LEF {}",
+                  tech_lef_path);
+    return false;
+  }
+  odb::dbTech* tech = tech_lib->getTech();
+  int idx = 0;
+  for (const std::string& cell_lef : cell_lef_paths) {
+    odb::dbLib* lib = reader.createLib(
+        tech, ("cells" + std::to_string(idx++)).c_str(), cell_lef.c_str());
+    if (lib == nullptr) {
+      logger_->warn(utl::UKN, kMsgLefLoad, "failed to load cell LEF {}",
+                    cell_lef);
+      return false;
+    }
+  }
+  // Masters loaded by lefin arrive already frozen (lefinReader freezes each
+  // MACRO at END; verified against the pinned SHA), so no setFrozen() here —
+  // unlike the synthetic path where NetlistBuilder freezes explicitly.
+  odb::dbChip* chip = odb::dbChip::create(db_, tech, design_name_);
+  block_ = odb::dbBlock::create(chip, design_name_.c_str());
+  tech_ready_ = true;
+  return true;
+}
+
+std::vector<odb::dbMaster*> NetlistBuilder::masters() const
+{
+  std::vector<odb::dbMaster*> out;
+  if (db_ == nullptr) {
+    return out;
+  }
+  for (odb::dbLib* lib : db_->getLibs()) {
+    for (odb::dbMaster* m : lib->getMasters()) {
+      out.push_back(m);
+    }
+  }
+  return out;
+}
+
 odb::dbMaster* NetlistBuilder::makeMaster(const std::string& name,
                                           const int num_inputs,
                                           const int num_outputs)
 {
+  ensureSyntheticTech();
   odb::dbLib* lib = *db_->getLibs().begin();
   odb::dbMaster* master = odb::dbMaster::create(lib, name.c_str());
   if (master == nullptr) {
@@ -58,11 +323,13 @@ odb::dbMaster* NetlistBuilder::makeMaster(const std::string& name,
 odb::dbInst* NetlistBuilder::makeInst(odb::dbMaster* master,
                                       const std::string& name)
 {
+  ensureSyntheticTech();
   return odb::dbInst::create(block_, master, name.c_str());
 }
 
 odb::dbNet* NetlistBuilder::makeNet(const std::string& name)
 {
+  ensureSyntheticTech();
   return odb::dbNet::create(block_, name.c_str());
 }
 
@@ -78,39 +345,211 @@ bool NetlistBuilder::connect(odb::dbInst* inst,
   return true;
 }
 
-int generateSynthetic(NetlistBuilder& builder,
-                      const SyntheticNetlistSpec& spec)
+NetlistBuilder::DieArea NetlistBuilder::estimateDieArea(const int num_insts,
+                                                        const double utilization)
 {
-  std::mt19937 rng(spec.seed);
+  ensureSyntheticTech();
 
-  std::vector<odb::dbMaster*> masters;
-  std::vector<double> weights;
-  for (const MasterSpec& ms : spec.masters) {
-    masters.push_back(
-        builder.makeMaster(ms.name, ms.num_inputs, ms.num_outputs));
-    weights.push_back(ms.weight);
+  // Site pitch: pull the first site from a loaded library (LEF mode), else
+  // fall back to a nominal 0.1um x 1.0um pitch at a 2000 DBU/um scale.
+  int site_w = 200;
+  int site_h = 2000;
+  for (odb::dbLib* lib : db_->getLibs()) {
+    auto sites = lib->getSites();
+    if (sites.begin() != sites.end()) {
+      odb::dbSite* site = *sites.begin();
+      site_w = site->getWidth();
+      site_h = site->getHeight();
+      break;
+    }
   }
 
-  std::discrete_distribution<int> pick_master(weights.begin(), weights.end());
-  std::vector<odb::dbInst*> insts;
-  for (int i = 0; i < spec.num_insts; ++i) {
-    insts.push_back(
-        builder.makeInst(masters[pick_master(rng)], "u" + std::to_string(i)));
+  const double util = (utilization > 0.0 && utilization <= 1.0) ? utilization
+                                                                : 0.7;
+  const double cell_area = static_cast<double>(site_w) * site_h;
+  const double total_area =
+      static_cast<double>(num_insts) * cell_area / util;
+  const double side = std::sqrt(std::max(total_area, cell_area));
+
+  // Snap to whole rows/columns of the site pitch.
+  const int rows = std::max(1, static_cast<int>(std::ceil(side / site_h)));
+  const int cols = std::max(
+      1, static_cast<int>(std::ceil(side / site_w)));
+  DieArea area;
+  area.ux = cols * site_w;
+  area.uy = rows * site_h;
+  block_->setDieArea(odb::Rect(area.lx, area.ly, area.ux, area.uy));
+  return area;
+}
+
+namespace {
+
+// The generation plan resolved from the spec: which masters populate each
+// combinational bucket and the sequential class, the (normalised) bucket
+// probabilities, and the sequential ratio.
+struct GenPlan
+{
+  std::array<std::vector<odb::dbMaster*>, kNumCombBuckets> comb;
+  std::vector<odb::dbMaster*> seq;
+  std::array<double, kNumCombBuckets> prob{};
+  std::array<double, kNumCombBuckets> anchors = kSyntheticBucketAnchors;
+  double seq_ratio = 0.0;
+};
+
+// Populate the plan's buckets/anchors from a loaded LEF library. Multi-output
+// combinational masters and cells with no valid bucket are excluded (logged).
+void populateLefBuckets(NetlistBuilder& builder, GenPlan& plan,
+                        utl::Logger* logger)
+{
+  std::array<double, kNumCombBuckets> sum{};
+  std::array<int, kNumCombBuckets> cnt{};
+  for (odb::dbMaster* m : builder.masters()) {
+    if (isSequentialMaster(m)) {
+      plan.seq.push_back(m);
+      continue;
+    }
+    const int outs = signalOutputCount(m);
+    if (outs != 1) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgExcludeMaster,
+                     "excluding combinational master {}: expected exactly "
+                     "one output, found {}",
+                     m->getName(), outs);
+      }
+      continue;
+    }
+    const int pins = signalPinCount(m);
+    const int b = bucketIndex(pins);
+    if (b < 0) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgExcludeMaster,
+                     "excluding master {}: {} signal pins is below the "
+                     "smallest bucket",
+                     m->getName(), pins);
+      }
+      continue;
+    }
+    plan.comb[b].push_back(m);
+    sum[b] += pins;
+    ++cnt[b];
+  }
+  for (int i = 0; i < kNumCombBuckets; ++i) {
+    plan.anchors[i] =
+        cnt[i] > 0 ? sum[i] / cnt[i] : kSyntheticBucketAnchors[i];
+  }
+}
+
+// Resolve bucket probabilities (Mode A direct, Mode B max-entropy). Returns
+// false only if a Mode-B target is outside the (LEF-measured) anchor range.
+bool resolveProbabilities(const SyntheticNetlistSpec& spec, GenPlan& plan,
+                          utl::Logger* logger)
+{
+  if (spec.combinational_pin_distribution.has_value()) {
+    for (int i = 0; i < kNumCombBuckets; ++i) {
+      plan.prob[i] = (*spec.combinational_pin_distribution)[i] / 100.0;
+    }
+    return true;
+  }
+  const double target = *spec.target_avg_fanout;
+  const double lo = *std::min_element(plan.anchors.begin(), plan.anchors.end());
+  const double hi = *std::max_element(plan.anchors.begin(), plan.anchors.end());
+  if (target <= lo || target >= hi) {
+    if (logger) {
+      logger->warn(utl::UKN, kMsgTargetRange,
+                   "target_avg_fanout {} is outside the measured anchor "
+                   "range ({}, {})",
+                   target, lo, hi);
+    }
+    return false;
+  }
+  plan.prob = maxEntropyDistribution(plan.anchors, target);
+  if (logger) {
+    logger->info(utl::UKN, kMsgDerivedDist,
+                 "max-entropy bucket distribution for target {}: "
+                 "[{:.3f}, {:.3f}, {:.3f}, {:.3f}, {:.3f}]",
+                 target, plan.prob[0], plan.prob[1], plan.prob[2],
+                 plan.prob[3], plan.prob[4]);
+  }
+  return true;
+}
+
+// Build (and validate) the generation plan. Returns false on any structural
+// error: an empty requested bucket or sequential class in LEF mode, a
+// Mode-B target outside the anchor range, or no LEF masters at all.
+bool buildPlan(NetlistBuilder& builder, const SyntheticNetlistSpec& spec,
+               GenPlan& plan)
+{
+  utl::Logger* logger = builder.logger();
+  plan.seq_ratio = spec.sequential_ratio.value_or(0.0);
+
+  const bool lef_mode = spec.tech_lef_path.has_value();
+  if (lef_mode) {
+    if (builder.masters().empty()) {
+      logger->warn(utl::UKN, kMsgNoLefMasters,
+                   "LEF mode requested but no masters were loaded");
+      return false;
+    }
+    populateLefBuckets(builder, plan, logger);
+  } else {
+    plan.anchors = kSyntheticBucketAnchors;
   }
 
-  // Pools of unused pins. Popping from a shuffled pool guarantees each
-  // iterm lands on at most one net, keeping the netlist valid.
+  if (!resolveProbabilities(spec, plan, logger)) {
+    return false;
+  }
+
+  if (lef_mode) {
+    for (int i = 0; i < kNumCombBuckets; ++i) {
+      if (plan.prob[i] > 0.0 && plan.comb[i].empty()) {
+        logger->warn(utl::UKN, kMsgEmptyBucket,
+                     "combinational bucket {} (pin-count {}) has weight {} "
+                     "but no matching masters in the loaded library",
+                     i, i + 2, plan.prob[i]);
+        return false;
+      }
+    }
+    if (plan.seq_ratio > 0.0 && plan.seq.empty()) {
+      logger->warn(utl::UKN, kMsgEmptySeq,
+                   "sequential_ratio is {} but no sequential (CLOCK-pin) "
+                   "masters were found in the loaded library",
+                   plan.seq_ratio);
+      return false;
+    }
+  } else {
+    // Synthetic mode: materialise one representative master per requested
+    // bucket and one sequential representative (D, CK, Q = 3 signal pins).
+    for (int i = 0; i < kNumCombBuckets; ++i) {
+      if (plan.prob[i] > 0.0) {
+        const int pin_count = static_cast<int>(kSyntheticBucketAnchors[i]);
+        odb::dbMaster* m = builder.makeMaster(
+            "COMB_" + std::to_string(pin_count), pin_count - 1, 1);
+        plan.comb[i].push_back(m);
+      }
+    }
+    if (plan.seq_ratio > 0.0) {
+      plan.seq.push_back(builder.makeMaster("SEQ", 2, 1));
+    }
+  }
+  return true;
+}
+
+// Form nets from two shuffled pin pools: one driver (OUTPUT) plus fanout-1
+// sinks (INPUT/INOUT) per net, popping each iterm at most once. Power/ground
+// pins are never eligible. Shared by the legacy and statistical paths; for
+// synthetic masters (no power pins) the classification is identical to the
+// Stage A code, keeping legacy output bit-identical.
+int formNets(NetlistBuilder& builder,
+             const std::vector<odb::dbInst*>& insts,
+             const SyntheticNetlistSpec& spec, std::mt19937& rng)
+{
   std::vector<odb::dbITerm*> drivers;
   std::vector<odb::dbITerm*> sinks;
   for (odb::dbInst* inst : insts) {
     for (odb::dbITerm* iterm : inst->getITerms()) {
-      // Classify each terminal by its dbMTerm IoType, never by pin name or
-      // position, so this loop works unchanged for LEF-backed masters with
-      // arbitrary pin names/ordering (Stage B). A driver is any OUTPUT
-      // terminal; INPUT and INOUT terminals are sink-capable. FEEDTHRU is
-      // ignored — it drives no logic. Synthetic masters emit only INPUT and
-      // OUTPUT, so the driver/sink pools here are identical to name-based
-      // classification (regression-safety gate).
+      const odb::dbSigType st = iterm->getSigType();
+      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
+        continue;
+      }
       switch (iterm->getIoType().getValue()) {
         case odb::dbIoType::OUTPUT:
           drivers.push_back(iterm);
@@ -144,6 +583,133 @@ int generateSynthetic(NetlistBuilder& builder,
     ++nets_made;
   }
   return nets_made;
+}
+
+// Legacy weighted-mix generation, byte-for-byte identical to Stage A.
+int generateLegacy(NetlistBuilder& builder, const SyntheticNetlistSpec& spec,
+                   std::mt19937& rng)
+{
+  std::vector<odb::dbMaster*> masters;
+  std::vector<double> weights;
+  for (const MasterSpec& ms : spec.masters) {
+    masters.push_back(
+        builder.makeMaster(ms.name, ms.num_inputs, ms.num_outputs));
+    weights.push_back(ms.weight);
+  }
+
+  std::discrete_distribution<int> pick_master(weights.begin(), weights.end());
+  std::vector<odb::dbInst*> insts;
+  for (int i = 0; i < spec.num_insts; ++i) {
+    insts.push_back(
+        builder.makeInst(masters[pick_master(rng)], "u" + std::to_string(i)));
+  }
+  return formNets(builder, insts, spec, rng);
+}
+
+// Statistical-mix generation (Stage B): per-instance sequential/combinational
+// roll, then a bucket roll, then a uniform pick among the bucket's masters.
+int generateStatistical(NetlistBuilder& builder,
+                        const SyntheticNetlistSpec& spec, std::mt19937& rng)
+{
+  GenPlan plan;
+  if (!buildPlan(builder, spec, plan)) {
+    return -1;
+  }
+
+  std::uniform_real_distribution<double> seq_roll(0.0, 1.0);
+  std::discrete_distribution<int> pick_bucket(plan.prob.begin(),
+                                              plan.prob.end());
+
+  int seq_count = 0;
+  long comb_signal_pins = 0;
+  std::array<int, kNumCombBuckets> bucket_count{};
+  std::vector<odb::dbInst*> insts;
+  insts.reserve(spec.num_insts);
+  for (int i = 0; i < spec.num_insts; ++i) {
+    odb::dbMaster* master = nullptr;
+    if (!plan.seq.empty() && seq_roll(rng) < plan.seq_ratio) {
+      std::uniform_int_distribution<size_t> pick(0, plan.seq.size() - 1);
+      master = plan.seq[pick(rng)];
+      ++seq_count;
+    } else {
+      const int b = pick_bucket(rng);
+      std::uniform_int_distribution<size_t> pick(0, plan.comb[b].size() - 1);
+      master = plan.comb[b][pick(rng)];
+      ++bucket_count[b];
+      comb_signal_pins += signalPinCount(master);
+    }
+    insts.push_back(builder.makeInst(master, "u" + std::to_string(i)));
+  }
+
+  const int nets_made = formNets(builder, insts, spec, rng);
+
+  // Post-generation empirical check: logged warning only, never a failure.
+  utl::Logger* logger = builder.logger();
+  const double tol = spec.distribution_tolerance_pct;
+  const double obs_seq = 100.0 * seq_count / spec.num_insts;
+  const double want_seq = 100.0 * plan.seq_ratio;
+  if (std::abs(obs_seq - want_seq) > tol) {
+    logger->warn(utl::UKN, kMsgTolerance,
+                 "empirical sequential ratio {:.2f}% deviates from target "
+                 "{:.2f}% by more than {:.2f}%",
+                 obs_seq, want_seq, tol);
+  }
+  const int comb_total = spec.num_insts - seq_count;
+  if (comb_total > 0) {
+    for (int i = 0; i < kNumCombBuckets; ++i) {
+      const double obs = 100.0 * bucket_count[i] / comb_total;
+      const double want = 100.0 * plan.prob[i];
+      if (std::abs(obs - want) > tol) {
+        logger->warn(utl::UKN, kMsgTolerance,
+                     "empirical bucket {} share {:.2f}% deviates from target "
+                     "{:.2f}% by more than {:.2f}%",
+                     i, obs, want, tol);
+      }
+    }
+  }
+  if (spec.target_avg_fanout.has_value() && comb_total > 0) {
+    // The pin-count distribution controls the mean signal-pin count of the
+    // combinational instances (which is what net formation later draws
+    // from). Compare that mean against the Mode-B target; actual per-net
+    // fanout is still governed by [min_fanout, max_fanout] this stage.
+    const double obs_mean = static_cast<double>(comb_signal_pins) / comb_total;
+    if (std::abs(obs_mean - *spec.target_avg_fanout) > tol) {
+      logger->warn(utl::UKN, kMsgTolerance,
+                   "empirical mean combinational signal-pin count {:.3f} "
+                   "deviates from target_avg_fanout {:.3f}",
+                   obs_mean, *spec.target_avg_fanout);
+    }
+  }
+  return nets_made;
+}
+
+}  // namespace
+
+int generateSynthetic(NetlistBuilder& builder,
+                      const SyntheticNetlistSpec& spec)
+{
+  if (!validateSpecConfig(spec, builder.logger())) {
+    return -1;
+  }
+
+  // LEF-backed builders load their tech/cells from the spec's paths before
+  // any instance is created.
+  if (spec.tech_lef_path.has_value()) {
+    if (!builder.loadLef(*spec.tech_lef_path, spec.cell_lef_paths)) {
+      return -1;
+    }
+  }
+
+  std::mt19937 rng(spec.seed);
+  if (!spec.usesStatisticalMix()) {
+    if (spec.masters.empty()) {
+      builder.logger()->warn(utl::UKN, kMsgNoMode,
+                             "legacy spec has an empty masters list");
+      return -1;
+    }
+    return generateLegacy(builder, spec, rng);
+  }
+  return generateStatistical(builder, spec, rng);
 }
 
 }  // namespace eda

@@ -8,6 +8,8 @@ Test data for the GTest suites and `hello_odb`. `EDA_LAB_DATA_DIR`
   come along from the source tree.
 - `gcd_nangate45.def` — a placed GCD design on Nangate45: 734 components,
   497 nets. The standard small benchmark for the hypergraph tests.
+- `synth_cells/` — tiny hand-written cell LEF fixtures for the netlistgen
+  Stage B tests (deliberately-shaped bucket coverage). Not from OpenROAD.
 
 ## Provenance
 

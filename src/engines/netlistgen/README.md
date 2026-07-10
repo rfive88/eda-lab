@@ -1,21 +1,18 @@
 # src/engines/netlistgen/
 
 Synthetic netlist generation engine. Builds `dbBlock`s through OpenDB API
-calls only — **no LEF/DEF input** — so tests and benchmarks can create
-netlists of any size with exactly known or statistically controlled
+calls — optionally backed by real LEF cells — so tests and benchmarks can
+create netlists of any size with exactly known or statistically controlled
 topology, then feed them to `Hypergraph::buildFromBlock()`.
 
-> **Migration status (Stage A of 5).** `netlistgen` was just promoted from a
-> Stage 1/2 test utility (`src/netlistgen/`) into an engine under
-> `src/engines/`. This stage is pure plumbing: the directory move, a proper
-> library target, and a pin-access refactor that reads pin direction from
-> `dbMTerm::getIoType()` instead of parsing pin names. **No new generation
-> capability was added.** Landing in later stages, in order:
-> - **Stage B** — LEF-backed masters (real cells) and a statistical cell
->   mix (weighted + max-entropy modes).
+> **Migration status (Stage B of 5).** Stage A promoted `netlistgen` from a
+> Stage 1/2 test utility into an engine and made pin access IoType-based.
+> **Stage B (this stage)** adds LEF-backed masters (real cells) and a
+> statistical cell mix (forward + max-entropy modes). Still landing later:
 > - **Stage C** — combinational-loop avoidance (provably acyclic net
->   formation among combinational cells). Until then the generator can
->   produce combinational cycles.
+>   formation). **Until then the generator can produce combinational cycles**
+>   — net formation still pairs drivers/sinks from shuffled pools, so this
+>   stage's output must not be treated as a valid acyclic netlist.
 > - **Stage D** — DEF / `.odb` writers and a standalone CLI executable.
 > - **Stage E** — primary I/O ports and a Verilog writer.
 >
@@ -25,72 +22,151 @@ topology, then feed them to `Hypergraph::buildFromBlock()`.
 
 Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
 
-- **`NetlistBuilder`** owns a fresh `dbDatabase` (tech, lib, chip, top
-  block) and wraps master/inst/net creation and pin connection. It handles
-  OpenDB's master-freeze protocol (`dbMTerm::create` all pins, then
-  `setFrozen()`, required before `dbInst::create`). Masters built here are
-  connectivity-only (no geometry), with input pins named `i0..iN-1` and
-  output pins `o0..oM-1`. Those names are a builder convenience only — the
-  generator does **not** depend on them (see below).
+- **`NetlistBuilder`** owns a fresh `dbDatabase`. Its tech/lib/chip/block are
+  created either:
+  - *synthetically* — connectivity-only masters (no geometry), input pins
+    `i0..iN-1` / output pins `o0..oM-1`, built lazily on first `makeMaster`
+    and frozen explicitly (OpenDB requires a frozen master before
+    `dbInst::create`); or
+  - *from LEF* — `loadLef(tech_lef, cell_lefs)` loads a real technology and
+    cell library through `odb::lefin`. `lefin` freezes each MACRO as it
+    parses, so no explicit freeze is needed on this path. A given builder is
+    one or the other, never both.
+
+  `estimateDieArea(num_insts, utilization)` auto-sizes a near-square
+  placement region from the instance count and the loaded tech's site pitch
+  (nominal pitch if none), records it on the block, and returns the box.
+  Instances stay `UNPLACED`; Stage D's DEF writer will consume it.
 
 - **`generateSynthetic(builder, spec)`** populates the block from a
-  `SyntheticNetlistSpec`. Instances are drawn from a weighted cell mix and
-  named `u0..u{n-1}`; nets are named `n0..n{k-1}`. Each terminal is sorted
-  into a driver pool or a sink pool **by its `dbMTerm` IoType, not by pin
-  name**: `OUTPUT` → driver, `INPUT`/`INOUT` → sink, `FEEDTHRU` → ignored.
-  No assumption is made about pin ordering or position, so the same code
-  path will drive Stage B's LEF-backed masters (arbitrary pin names/counts)
-  unchanged. Each net takes one unused driver pin and `fanout−1` unused sink
-  pins from shuffled pools, so every iterm lands on at most one net — always
-  a valid netlist. Generation stops when the requested net count is reached
-  or a pin pool drains. A seeded `std::mt19937` makes a given `(spec, seed)`
-  reproducible.
+  `SyntheticNetlistSpec` using a seeded `std::mt19937`. Two mix regimes:
+  - **Legacy weighted mix (Stage A).** When none of the statistical/LEF
+    fields are set, cells are drawn from the explicit `masters` weighted
+    list exactly as in Stage A — **output is bit-identical** for a given
+    `(spec, seed)`.
+  - **Statistical mix (Stage B).** Engaged when any statistical field (or a
+    LEF path) is set. Each instance is first rolled sequential vs
+    combinational by `sequential_ratio`; a combinational instance then rolls
+    a pin-count bucket from the effective distribution and a master uniformly
+    among that bucket's cells.
+
+  Net formation is shared by both regimes: terminals are bucketed into a
+  driver pool (`OUTPUT`) and a sink pool (`INPUT`/`INOUT`) **by IoType, with
+  power/ground pins excluded by `dbSigType`**; each net takes one driver and
+  `fanout−1` sinks from the shuffled pools, so every iterm lands on at most
+  one net. Returns the net count, or **`-1`** if the spec fails validation.
+
+## Statistical cell-mix contract
+
+- **Pin counting excludes power/ground.** `signalPinCount(master)` counts
+  only `dbMTerm`s with `dbSigType::SIGNAL` or `CLOCK`; `VDD`/`VSS`
+  (`POWER`/`GROUND`) never inflate a bucket. One shared helper used by both
+  the synthetic and LEF paths.
+- **Five combinational buckets** by signal-pin count: **2, 3, 4, 5, 6-or-more**
+  (2-pin = buffer/inverter, 3-pin = 2-input gate, …). In synthetic mode the
+  "6+" bucket is pinned to exactly 6.
+- **Two mutually exclusive combinational modes** (exactly one required when
+  the statistical mix is engaged; both or neither → fail fast):
+  - **Mode A — forward:** `combinational_pin_distribution`, five percentages
+    that must sum to 100.
+  - **Mode B — inverse:** `target_avg_fanout`, the desired average
+    signal-pin count. The generator back-solves the **maximum-entropy**
+    distribution `p_i = exp(θ·xᵢ)/Σ exp(θ·xⱼ)` over the bucket anchors `xᵢ`
+    whose weighted mean equals the target — a single scalar `θ` found by
+    bisection (`maxEntropyDistribution`, plain `<cmath>`). This spreads mass
+    across all buckets as evenly as the mean constraint allows, with no
+    user-supplied prior. The derived distribution is logged. The target must
+    lie strictly inside the anchor range (synthetic: `(2, 6)`).
+- **Sequential cells** get one fixed representative profile this stage
+  (synthetic: `D, CK, Q` = 3 signal pins). No pin-count distribution for the
+  sequential side yet.
+- **LEF-mode classification is auto-detected.** A master is *sequential* if
+  any `dbMTerm` carries `dbSigType::CLOCK`; everything else is combinational
+  and bucketed by signal-pin count. At spec-build time a lookup is built —
+  per bucket, the matching masters; separately, the sequential class.
+  - A combinational master must resolve to **exactly one output** and
+    `(pin_count − 1)` inputs; **multi-output combinational masters are
+    excluded** from bucket population (logged). This is a load-bearing
+    assumption for Stage C's DAG net formation, enforced now.
+  - A **requested** bucket (positive probability) with no matching master —
+    or `sequential_ratio > 0` with an empty sequential class — is a
+    **hard failure at spec-build time**, naming the empty bucket/class. No
+    silent skip or weight redistribution.
+  - **Nangate45 caveat:** its DFF clock pins are tagged `USE SIGNAL`, not
+    `CLOCK`, so the CLOCK auto-detection finds **no** sequential cells and
+    the DFFs (with `Q`+`QN`) are excluded as multi-output combinational. LEF
+    tests therefore use `sequential_ratio = 0.0`.
+- **`distribution_tolerance_pct`** (default 2.0): after generation, empirical
+  proportions (and, in Mode B, the mean combinational signal-pin count) are
+  compared to the targets. A deviation past tolerance is a **logged warning
+  only, never a failure** — stochastic draws won't hit exact percentages,
+  especially at small counts. Contrast the spec-build-time checks
+  (distribution sum, mode exclusivity, target range, non-empty buckets),
+  which stay hard failures.
 
 ## Input / output contract
 
-Standalone in-memory library: **no hypergraph attribute planes** are read
-or written. Input is a `SyntheticNetlistSpec` (C++ struct); output is a
-populated `dbBlock` owned by the `NetlistBuilder`, plus the net count as the
-return value. The block is consumed downstream by
-`Hypergraph::buildFromBlock()`.
+Standalone in-memory library: **no hypergraph attribute planes** read or
+written. Input is a `SyntheticNetlistSpec`; output is a populated `dbBlock`
+owned by the `NetlistBuilder`, plus the net count (or `-1` on invalid spec).
+Consumed downstream by `Hypergraph::buildFromBlock()`.
 
 ## Control parameters (`SyntheticNetlistSpec`)
 
 | Field | Type | Default | Meaning |
 |-------|------|---------|---------|
-| `masters` | `std::vector<MasterSpec>` | — (must be non-empty) | Weighted cell mix. |
-| `num_insts` | `int` | `0` (must be `> 0`) | Number of instances to create. |
-| `num_nets` | `int` | `-1` | Net cap; `-1` means "as many as the pin pools allow". |
-| `min_fanout` | `int` | `2` | Min pins per net (driver included). |
-| `max_fanout` | `int` | `4` | Max pins per net (driver included). |
+| `masters` | `std::vector<MasterSpec>` | — | Legacy weighted mix (ignored in statistical mode). |
+| `num_insts` | `int` | `0` (must be `> 0`) | Number of instances. |
+| `num_nets` | `int` | `-1` | Net cap; `-1` = as many as the pin pools allow. |
+| `min_fanout` / `max_fanout` | `int` | `2` / `4` | Pins per net, driver included. |
 | `seed` | `uint32_t` | `1` | RNG seed; fixes output for a given spec. |
+| `tech_lef_path` | `std::optional<std::string>` | unset | If set, load real tech (and its macros) via `lefin`. |
+| `cell_lef_paths` | `std::vector<std::string>` | `{}` | Extra cell LEF(s) against that tech. |
+| `sequential_ratio` | `std::optional<double>` | unset (→ 0.0) | Fraction of instances that are sequential. |
+| `combinational_pin_distribution` | `std::optional<array<double,5>>` | unset | Mode A percentages `[2,3,4,5,6+]`, sum 100. |
+| `target_avg_fanout` | `std::optional<double>` | unset | Mode B target mean signal-pin count. |
+| `distribution_tolerance_pct` | `double` | `2.0` | Post-gen deviation warning threshold. |
 
-`MasterSpec` fields: `name` (`std::string`), `num_inputs` (`int`, default
-`2`), `num_outputs` (`int`, default `1`), `weight` (`double`, default `1.0`;
-relative pick frequency, need not sum to 1). Every combinational master is
-modeled as exactly one output pin and `(pin_count − 1)` input pins.
+`MasterSpec`: `name`, `num_inputs` (2), `num_outputs` (1), `weight` (1.0).
+
+The statistical mix is engaged when `tech_lef_path`, `sequential_ratio`,
+`combinational_pin_distribution`, or `target_avg_fanout` is set
+(`SyntheticNetlistSpec::usesStatisticalMix()`).
 
 ## Determinism
 
-Output for a given `(spec, seed)` is bit-identical across runs and
-platforms — the generator draws from a seeded `std::mt19937` and the
-pin-classification order is fixed by `dbInst`/`dbITerm` iteration order.
+Output for a given `(spec, seed)` is reproducible across runs on a fixed
+toolchain: the generator draws from a seeded `std::mt19937` and instance /
+pin iteration order is fixed by OpenDB set order. The legacy path is
+additionally bit-identical to Stage A.
 
 ## How to run
-
-Link the library and call it in-memory — this is the intended consumer
-pattern for other engines (e.g. a partitioner choosing synthetic input over
-real LEF/DEF):
 
 ```cmake
 target_link_libraries(<your_target> PRIVATE netlistgen odb utl)
 ```
 
+Synthetic statistical mix (Mode A):
+
 ```cpp
 eda::NetlistBuilder nb;
 eda::SyntheticNetlistSpec spec;
-spec.masters = {{"INV", 1, 1, 1.0}, {"NAND2", 2, 1, 2.0}};
-spec.num_insts = 1000;
+spec.num_insts = 10000;
+spec.sequential_ratio = 0.2;
+spec.combinational_pin_distribution = std::array<double,5>{30,25,20,15,10};
+const int nets = eda::generateSynthetic(nb, spec);   // -1 on bad spec
+```
+
+LEF-backed, Mode B (max-entropy):
+
+```cpp
+eda::NetlistBuilder nb("lefdesign");
+eda::SyntheticNetlistSpec spec;
+spec.tech_lef_path  = "data/nangate45/Nangate45_tech.lef";
+spec.cell_lef_paths = {"data/nangate45/Nangate45_stdcell.lef"};
+spec.num_insts = 500;
+spec.sequential_ratio = 0.0;      // Nangate45 tags no CLOCK pins
+spec.target_avg_fanout = 3.5;
 const int nets = eda::generateSynthetic(nb, spec);
 eda::Hypergraph hg;
 hg.buildFromBlock(nb.block());
@@ -100,17 +176,19 @@ hg.buildFromBlock(nb.block());
 
 ```bash
 cmake -B build
-cmake --build build --target netlistgen_test netlistgen_link_smoke
-ctest --test-dir build -R "netlistgen_test|netlistgen_link_smoke" --output-on-failure
+cmake --build build --target netlistgen_test netlistgen_stageb_test netlistgen_link_smoke
+ctest --test-dir build -R "netlistgen" --output-on-failure
 ```
 
-- `test/netlistgen_test.cpp` — behavior: exact CSR contents on a hand-built
-  3-inst/2-net case, spec conformance (fanout bounds, counts, pin
-  uniqueness) on 2000 insts, net-count limiting, and seed determinism. No
-  data files needed.
-- `test/netlistgen_link_smoke.cpp` — library-linkage guard: an external
-  consumer that links `PRIVATE netlistgen odb utl` and calls the engine,
-  proving `netlistgen` is a real linkable library target (fails to link if
-  it ever regresses to header-only).
+- `test/netlistgen_test.cpp` — Stage A behavior (no data files): exact CSR on
+  a hand-built 3-inst/2-net case, spec conformance, net-count limiting, seed
+  determinism.
+- `test/netlistgen_stageb_test.cpp` — Stage B (needs `EDA_LAB_DATA_DIR`):
+  max-entropy solve correctness, spec-config validation (both/neither mode,
+  bad sum, out-of-range target), signal-pin counting on a Nangate45 NAND2,
+  LEF-backed generation, multi-output exclusion, empty-bucket/empty-sequential
+  fail-fast (using `data/synth_cells/twobucket.lef`), large-run statistical
+  validation, Mode B mean, determinism, and die-area sizing.
+- `test/netlistgen_link_smoke.cpp` — library-linkage guard.
 
 Scale reference: ~500k insts / ~1.4M pins generate in about 2 s.

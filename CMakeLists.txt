@@ -44,6 +44,13 @@ add_executable(netlistgen_test test/netlistgen_test.cpp)
 target_link_libraries(netlistgen_test PRIVATE netlistgen hypergraph odb utl
                                               GTest::gtest GTest::gtest_main)
 
+add_executable(netlistgen_stageb_test test/netlistgen_stageb_test.cpp)
+target_compile_definitions(netlistgen_stageb_test
+                           PRIVATE EDA_LAB_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
+target_link_libraries(netlistgen_stageb_test PRIVATE netlistgen hypergraph odb
+                                                     utl GTest::gtest
+                                                     GTest::gtest_main)
+
 # Library-linkage smoke test: builds an external consumer that links the
 # `netlistgen` library target (PRIVATE netlistgen odb utl) and calls into it,
 # WITHOUT compiling netlistgen's sources into the binary. If netlistgen ever
@@ -61,5 +68,6 @@ target_link_libraries(fm_partitioner_test PRIVATE partitioning hypergraph odb
 include(GoogleTest)
 add_test(NAME hypergraph_test COMMAND hypergraph_test)
 add_test(NAME netlistgen_test COMMAND netlistgen_test)
+add_test(NAME netlistgen_stageb_test COMMAND netlistgen_stageb_test)
 add_test(NAME netlistgen_link_smoke COMMAND netlistgen_link_smoke)
 add_test(NAME fm_partitioner_test COMMAND fm_partitioner_test)

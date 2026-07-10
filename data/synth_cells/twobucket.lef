@@ -1,0 +1,89 @@
+# Minimal hand-written cell LEF used only by the netlistgen Stage B tests.
+# Two connectivity cells, deliberately covering ONLY pin-count buckets 2 and
+# 4 (signal pins), so the 3-, 5- and 6+ buckets are empty. It lets the
+# bucket-population test confirm that generateSynthetic() fails fast at
+# spec-build time when a requested bucket has no matching master.
+#
+# Loaded against Nangate45_tech.lef (same SITE / metal1 layer). Geometry is
+# nominal; these cells exist for connectivity classification only.
+VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+
+MACRO BUFB2
+  CLASS CORE ;
+  SIZE 0.19 BY 1.4 ;
+  SITE FreePDK45_38x28_10R_NP_162NW_34O ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.0 0.0 0.05 0.05 ;
+    END
+  END A
+  PIN Z
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.1 0.0 0.15 0.05 ;
+    END
+  END Z
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+  END VSS
+END BUFB2
+
+MACRO AND3B4
+  CLASS CORE ;
+  SIZE 0.57 BY 1.4 ;
+  SITE FreePDK45_38x28_10R_NP_162NW_34O ;
+  PIN A1
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.0 0.0 0.05 0.05 ;
+    END
+  END A1
+  PIN A2
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.1 0.0 0.15 0.05 ;
+    END
+  END A2
+  PIN A3
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.2 0.0 0.25 0.05 ;
+    END
+  END A3
+  PIN Z
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.3 0.0 0.35 0.05 ;
+    END
+  END Z
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+  END VSS
+END AND3B4
+
+END LIBRARY

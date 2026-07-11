@@ -11,4 +11,4 @@ __pycache__/
 run/*
 !run/.gitkeep
 !run/README.md
-src/engines/partitioning/docs/*.pdf
+docs/papers/*.pdf

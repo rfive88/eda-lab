@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cmath>
 #include <filesystem>
+#include <initializer_list>
 #include <random>
 #include <string>
 
@@ -72,6 +73,21 @@ int signalOutputCount(odb::dbMaster* master)
   return outs;
 }
 
+// Case-insensitive match of a pin name against a fixed candidate list.
+bool pinNameIsOneOf(const std::string& name,
+                    std::initializer_list<const char*> candidates)
+{
+  std::string upper = name;
+  std::transform(upper.begin(), upper.end(), upper.begin(),
+                 [](unsigned char c) { return std::toupper(c); });
+  for (const char* candidate : candidates) {
+    if (upper == candidate) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // A clock input pin marks a sequential cell. Many libraries (Nangate45 among
 // them) declare the clock pin with USE SIGNAL rather than USE CLOCK, so the
 // sig type alone misses every flip-flop. Recognise the conventional clock-pin
@@ -79,16 +95,15 @@ int signalOutputCount(odb::dbMaster* master)
 // names (verified against Nangate45), so this does not misclassify them.
 bool isClockPinName(const std::string& name)
 {
-  static const char* const kClockPinNames[] = {"CK", "CLK", "CLOCK", "CP"};
-  std::string upper = name;
-  std::transform(upper.begin(), upper.end(), upper.begin(),
-                 [](unsigned char c) { return std::toupper(c); });
-  for (const char* candidate : kClockPinNames) {
-    if (upper == candidate) {
-      return true;
-    }
-  }
-  return false;
+  return pinNameIsOneOf(name, {"CK", "CLK", "CLOCK", "CP"});
+}
+
+// A level-sensitive latch's gate/enable pin. In Nangate45 these names (G/GN)
+// belong exclusively to the D-latch cells (DLH/DLL/TLAT) and never to a
+// combinational gate, so they cleanly single out latches.
+bool isLatchEnablePinName(const std::string& name)
+{
+  return pinNameIsOneOf(name, {"G", "GN"});
 }
 
 double meanOfTilt(const std::array<double, kNumCombBuckets>& anchors,
@@ -132,6 +147,21 @@ bool isSequentialMaster(odb::dbMaster* master)
     // and excluded, leaving no sequential masters to satisfy sequential_ratio).
     if (mterm->getIoType() == odb::dbIoType::INPUT
         && isClockPinName(mterm->getName())) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool isLatchMaster(odb::dbMaster* master)
+{
+  // A cell with a clock pin is a flip-flop (or clock gate), not a plain latch.
+  if (isSequentialMaster(master)) {
+    return false;
+  }
+  for (odb::dbMTerm* mterm : master->getMTerms()) {
+    if (mterm->getIoType() == odb::dbIoType::INPUT
+        && isLatchEnablePinName(mterm->getName())) {
       return true;
     }
   }
@@ -475,8 +505,9 @@ struct GenPlan
   double seq_ratio = 0.0;
 };
 
-// Populate the plan's buckets/anchors from a loaded LEF library. Multi-output
-// combinational masters and cells with no valid bucket are excluded (logged).
+// Populate the plan's buckets/anchors from a loaded LEF library. Latches are
+// dropped entirely; multi-output combinational masters and cells with no valid
+// bucket are excluded (all logged).
 void populateLefBuckets(NetlistBuilder& builder, GenPlan& plan,
                         utl::Logger* logger)
 {
@@ -485,6 +516,15 @@ void populateLefBuckets(NetlistBuilder& builder, GenPlan& plan,
   for (odb::dbMaster* m : builder.masters()) {
     if (isSequentialMaster(m)) {
       plan.seq.push_back(m);
+      continue;
+    }
+    // Level-sensitive latches are used as neither sequential nor combinational.
+    if (isLatchMaster(m)) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgExcludeMaster,
+                     "excluding latch master {}: latches are not used",
+                     m->getName());
+      }
       continue;
     }
     const int outs = signalOutputCount(m);

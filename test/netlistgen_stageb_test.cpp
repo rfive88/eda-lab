@@ -154,6 +154,7 @@ TEST(SignalPinCountTest, ExcludesPowerGround)
   odb::dbMaster* nand2 = nullptr;
   odb::dbMaster* fa = nullptr;
   odb::dbMaster* dff = nullptr;
+  odb::dbMaster* dlh = nullptr;
   for (odb::dbMaster* m : nb.masters()) {
     if (m->getName() == "NAND2_X1") {
       nand2 = m;
@@ -164,22 +165,34 @@ TEST(SignalPinCountTest, ExcludesPowerGround)
     if (m->getName() == "DFF_X1") {
       dff = m;
     }
+    if (m->getName() == "DLH_X1") {
+      dlh = m;
+    }
   }
   ASSERT_NE(nand2, nullptr);
   // A1, A2 (in), ZN (out) are SIGNAL; VDD/VSS are POWER/GROUND.
   EXPECT_EQ(signalPinCount(nand2), 3);
   EXPECT_FALSE(isSequentialMaster(nand2));
+  EXPECT_FALSE(isLatchMaster(nand2));
 
   // FA_X1: A, B, CI in + CO, S out = 5 signal pins, 2 outputs.
   ASSERT_NE(fa, nullptr);
   EXPECT_EQ(signalPinCount(fa), 5);
   EXPECT_FALSE(isSequentialMaster(fa));  // two outputs, but no clock => comb
+  EXPECT_FALSE(isLatchMaster(fa));
 
   // DFF_X1: clock pin CK is USE SIGNAL in Nangate45, so isSequentialMaster must
   // recognise it by name (else its Q+QN read as a multi-output comb cell and it
   // gets excluded, leaving no sequential masters — the reported bug).
   ASSERT_NE(dff, nullptr);
   EXPECT_TRUE(isSequentialMaster(dff));
+  EXPECT_FALSE(isLatchMaster(dff));  // flip-flop, not a latch
+
+  // DLH_X1: level-sensitive latch (gate pin G, no clock). Classified as a latch
+  // so it is dropped entirely — neither sequential nor combinational.
+  ASSERT_NE(dlh, nullptr);
+  EXPECT_FALSE(isSequentialMaster(dlh));
+  EXPECT_TRUE(isLatchMaster(dlh));
 }
 
 // ---------------------------------------------------------------------------
@@ -244,6 +257,23 @@ TEST(LefGenerationTest, ExcludesMultiOutputMasters)
     EXPECT_EQ(outs, 1) << inst->getMaster()->getName();
     EXPECT_NE(inst->getMaster()->getName(), "FA_X1");
     EXPECT_FALSE(isSequentialMaster(inst->getMaster()))
+        << inst->getMaster()->getName();
+    EXPECT_FALSE(isLatchMaster(inst->getMaster()))
+        << inst->getMaster()->getName();
+  }
+}
+
+// Latches (DLH/DLL/TLAT) are used as neither sequential nor combinational, so no
+// instance in any LEF-backed run may be a latch — regardless of sequential_ratio.
+TEST(LefGenerationTest, NeverPlacesLatches)
+{
+  NetlistBuilder nb("leflatch");
+  SyntheticNetlistSpec spec = lefSpec();
+  spec.sequential_ratio = 0.2;
+  const int nets = generateSynthetic(nb, spec);
+  ASSERT_GT(nets, 0);
+  for (odb::dbInst* inst : nb.block()->getInsts()) {
+    EXPECT_FALSE(isLatchMaster(inst->getMaster()))
         << inst->getMaster()->getName();
   }
 }

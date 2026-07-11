@@ -209,9 +209,17 @@ int generateSynthetic(NetlistBuilder& builder,
 // CLOCK, excluding POWER/GROUND. One shared counting rule for both paths.
 int signalPinCount(odb::dbMaster* master);
 
-// True if any of the master's dbMTerms carries dbSigType::CLOCK — the
-// auto-detection rule for sequential cells in LEF mode.
+// True if the master has a clock pin — a dbMTerm with dbSigType::CLOCK, or an
+// INPUT pin with a conventional clock name (CK/CLK/CLOCK/CP) for libraries that
+// tag the clock pin USE SIGNAL (e.g. Nangate45). The auto-detection rule for
+// sequential (flip-flop) cells in LEF mode.
 bool isSequentialMaster(odb::dbMaster* master);
+
+// True if the master is a level-sensitive latch: it has a latch gate/enable pin
+// (INPUT named G/GN) but no clock pin, so it is neither a flip-flop nor a plain
+// combinational gate. Latches are dropped entirely in LEF mode — used as
+// neither sequential nor combinational masters.
+bool isLatchMaster(odb::dbMaster* master);
 
 // Config-only spec validation (everything that does not depend on a loaded
 // LEF library): mutual exclusivity of the two combinational modes, the

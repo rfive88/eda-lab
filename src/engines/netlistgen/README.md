@@ -100,6 +100,11 @@ Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
   case-insensitive; `isClockPinName`). Everything else is combinational and
   bucketed by signal-pin count. At spec-build time a lookup is built — per
   bucket, the matching masters; separately, the sequential class.
+  - **Level-sensitive latches are dropped entirely** — used as neither
+    sequential nor combinational masters. A latch is a non-clocked master with
+    a gate/enable pin (`INPUT` named `G`/`GN`; `isLatchMaster`), which in
+    Nangate45 is exactly `DLH`/`DLL`/`TLAT`. Excluded with a log, so they never
+    appear as instances.
   - A combinational master must resolve to **exactly one output** and
     `(pin_count − 1)` inputs; **multi-output combinational masters are
     excluded** from bucket population (logged). This is a load-bearing

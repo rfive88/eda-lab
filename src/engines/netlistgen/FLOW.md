@@ -137,7 +137,7 @@ graph TD
   load -->|no| r1
   load -->|yes| mode
   lef -->|no| mode{"usesStatisticalMix()?"}
-  mode -->|no| legacy["generateLegacy:<br/>makeMaster per MasterSpec<br/>discrete_distribution weighted picks<br/>(bit-identical to Stage A)"]
+  mode -->|no| legacy["generateLegacy:<br/>makeMaster per MasterSpec<br/>discrete_distribution weighted picks<br/>(Stage A path; deterministic)"]
   mode -->|yes| stat["generateStatistical"]
   legacy --> fn["formNets"]
   stat --> fn
@@ -177,10 +177,10 @@ graph TD
 ## `netlistgen.cpp` — `formNets()` (shared)
 
 Both regimes end here. Terminals are bucketed into driver/sink pools by
-IoType, with power/ground excluded by `dbSigType` — for synthetic masters
-(no power pins) this is identical to Stage A, keeping legacy output
-bit-identical. Every iterm is popped at most once, so the netlist is valid
-(each pin on ≤ 1 net) — **though not yet acyclic; Stage D adds that**.
+IoType, with power/ground excluded by `dbSigType`. Each net gets one driver
+plus `fanout` sinks, where `fanout` is the load count (driver excluded). Every
+iterm is popped at most once, so the netlist is valid (each pin on ≤ 1 net) —
+**though not yet acyclic; Stage D adds that**.
 
 ```mermaid
 graph TD
@@ -195,7 +195,7 @@ graph TD
   shuf --> whilecond{"pools non-empty AND<br/>(num_nets<0 or made<num_nets)?"}
   whilecond -->|no| done["return nets_made"]
   whilecond -->|yes| net["makeNet; connect driver; pop"]
-  net --> fan["k = pick_fanout(rng) - 1"]
+  net --> fan["k = pick_fanout(rng)  (fanout = loads, driver excluded)"]
   fan --> sinkloop["connect up to k sinks; pop"]
   sinkloop --> incr["++nets_made"]
   incr --> whilecond

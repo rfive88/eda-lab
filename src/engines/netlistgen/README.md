@@ -56,8 +56,9 @@ Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
   `SyntheticNetlistSpec` using a seeded `std::mt19937`. Two mix regimes:
   - **Legacy weighted mix (Stage A).** When none of the statistical/LEF
     fields are set, cells are drawn from the explicit `masters` weighted
-    list exactly as in Stage A — **output is bit-identical** for a given
-    `(spec, seed)`.
+    list. Deterministic for a given `(spec, seed)`. (Net shapes shifted by
+    one sink when `fanout` was redefined from pins-per-net to loads, so
+    output is no longer identical to the original Stage A.)
   - **Statistical mix (Stage B).** Engaged when any statistical field (or a
     LEF path) is set. Each instance is first rolled sequential vs
     combinational by `sequential_ratio`; a combinational instance then rolls
@@ -67,8 +68,9 @@ Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
   Net formation is shared by both regimes: terminals are bucketed into a
   driver pool (`OUTPUT`) and a sink pool (`INPUT`/`INOUT`) **by IoType, with
   power/ground pins excluded by `dbSigType`**; each net takes one driver and
-  `fanout−1` sinks from the shuffled pools, so every iterm lands on at most
-  one net. Returns the net count, or **`-1`** if the spec fails validation.
+  `fanout` sinks (fanout excludes the driver) from the shuffled pools, so every
+  iterm lands on at most one net. Returns the net count, or **`-1`** if the
+  spec fails validation.
 
 ## Statistical cell-mix contract
 
@@ -209,7 +211,7 @@ never into the `netlistgen` library). The schema is a serialization of
 | `instance_count` | `spec.num_insts` | **Required**, `> 0`. |
 | `seed` | `spec.seed` | Optional. |
 | `net_count` | `spec.num_nets` | `null`/absent → `-1` (as many as pools allow). |
-| `fanout_range` `{min,max}` | `spec.min_fanout` / `max_fanout` | Optional. |
+| `fanout_range` `{min,max}` | `spec.min_fanout` / `max_fanout` | Optional. Load pins per net (fanout), driver excluded. |
 | `tech_lef_path` | `spec.tech_lef_path` | Optional; engages LEF mode. |
 | `cell_lef_paths` | `spec.cell_lef_paths` | Optional array. |
 | `sequential_ratio` | `spec.sequential_ratio` | Optional. |
@@ -320,7 +322,7 @@ Consumed downstream by `Hypergraph::buildFromBlock()`.
 | `masters` | `std::vector<MasterSpec>` | — | Legacy weighted mix (ignored in statistical mode). |
 | `num_insts` | `int` | `0` (must be `> 0`) | Number of instances. |
 | `num_nets` | `int` | `-1` | Net cap; `-1` = as many as the pin pools allow. |
-| `min_fanout` / `max_fanout` | `int` | `2` / `4` | Pins per net, driver included. |
+| `min_fanout` / `max_fanout` | `int` | `2` / `4` | Load pins per net (fanout), driver excluded. |
 | `seed` | `uint32_t` | `1` | RNG seed; fixes output for a given spec. |
 | `tech_lef_path` | `std::optional<std::string>` | unset | If set, load real tech (and its macros) via `lefin`. |
 | `cell_lef_paths` | `std::vector<std::string>` | `{}` | Extra cell LEF(s) against that tech. |
@@ -339,8 +341,7 @@ The statistical mix is engaged when `tech_lef_path`, `sequential_ratio`,
 
 Output for a given `(spec, seed)` is reproducible across runs on a fixed
 toolchain: the generator draws from a seeded `std::mt19937` and instance /
-pin iteration order is fixed by OpenDB set order. The legacy path is
-additionally bit-identical to Stage A. Determinism carries through the CLI: a
+pin iteration order is fixed by OpenDB set order. Determinism carries through the CLI: a
 given JSON config produces the same block — and hence the same DEF / `.odb` —
 each run. Scale reference: **~500k insts / ~1.4M pins in ~2 s** for synthetic
 mode; LEF-backed mode has not been separately benchmarked at that scale yet.

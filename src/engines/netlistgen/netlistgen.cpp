@@ -693,11 +693,11 @@ bool buildPlan(NetlistBuilder& builder, const SyntheticNetlistSpec& spec,
   return true;
 }
 
-// Form nets from two shuffled pin pools: one driver (OUTPUT) plus fanout-1
-// sinks (INPUT/INOUT) per net, popping each iterm at most once. Power/ground
-// pins are never eligible. Shared by the legacy and statistical paths; for
-// synthetic masters (no power pins) the classification is identical to the
-// Stage A code, keeping legacy output bit-identical.
+// Form nets from two shuffled pin pools: one driver (OUTPUT) plus `fanout`
+// sinks (INPUT/INOUT) per net — fanout is the load count, driver excluded —
+// popping each iterm at most once. Power/ground pins are never eligible. Shared
+// by the legacy and statistical paths. (Fanout was redefined from pins-per-net
+// to loads, so net shapes shift by one sink vs. the original Stage A output.)
 int formNets(NetlistBuilder& builder,
              const std::vector<odb::dbInst*>& insts,
              const SyntheticNetlistSpec& spec, std::mt19937& rng)
@@ -736,7 +736,9 @@ int formNets(NetlistBuilder& builder,
     drivers.back()->connect(net);
     drivers.pop_back();
 
-    const int num_sinks = pick_fanout(rng) - 1;
+    // fanout is the number of load (sink) pins, driver excluded, so the net
+    // gets one driver plus `fanout` sinks (total fanout+1 pins).
+    const int num_sinks = pick_fanout(rng);
     int connected = 0;
     for (int s = 0; s < num_sinks && !sinks.empty(); ++s) {
       sinks.back()->connect(net);
@@ -759,7 +761,8 @@ int formNets(NetlistBuilder& builder,
   return nets_made;
 }
 
-// Legacy weighted-mix generation, byte-for-byte identical to Stage A.
+// Legacy weighted-mix generation (Stage A path). Deterministic for a given
+// (spec, seed); net shapes reflect the loads-based fanout definition.
 int generateLegacy(NetlistBuilder& builder, const SyntheticNetlistSpec& spec,
                    std::mt19937& rng)
 {

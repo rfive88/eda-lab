@@ -350,9 +350,9 @@ avoidance, and DEF/`.odb`/Verilog writers land in later stages — see
 - **`generateSynthetic(builder, spec)`** populates the block from a
   `SyntheticNetlistSpec`: weighted cell mix (`MasterSpec` name/inputs/outputs/
   weight), instance count, optional net count, and a fanout range
-  `[min_fanout, max_fanout]` (pins per net, driver included). Seeded
+  `[min_fanout, max_fanout]` (load pins per net, driver excluded). Seeded
   `std::mt19937` makes a given (spec, seed) reproducible. Each net takes one
-  unused output pin (driver) and fanout−1 unused input pins from shuffled
+  unused output pin (driver) and `fanout` unused input pins from shuffled
   pools, so every iterm lands on at most one net — always a valid netlist.
   Generation stops when the requested net count is reached or a pin pool
   drains. Scale: ~500k insts / ~1.4M pins generate in about 2s.

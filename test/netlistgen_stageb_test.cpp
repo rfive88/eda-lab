@@ -248,9 +248,11 @@ TEST(LefGenerationTest, GeneratesValidNetlist)
   EXPECT_EQ(hg.numVertices(), spec.num_insts);
   EXPECT_EQ(hg.numHyperedges(), nets);
   for (int e = 0; e < hg.numHyperedges(); ++e) {
-    const int fanout = hg.hyperedgeOffsets()[e + 1] - hg.hyperedgeOffsets()[e];
-    EXPECT_GE(fanout, 2) << "net " << e;
-    EXPECT_LE(fanout, spec.max_fanout) << "net " << e;
+    // fanout excludes the driver, so total pins per net is in
+    // [min_fanout+1, max_fanout+1] (lower bound relaxes to 2 on a drained net).
+    const int pins = hg.hyperedgeOffsets()[e + 1] - hg.hyperedgeOffsets()[e];
+    EXPECT_GE(pins, 2) << "net " << e;
+    EXPECT_LE(pins, spec.max_fanout + 1) << "net " << e;
   }
 }
 

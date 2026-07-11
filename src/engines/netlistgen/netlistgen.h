@@ -156,9 +156,9 @@ struct SyntheticNetlistSpec
   // many as the pin pools allow".
   int num_nets = -1;
 
-  // Total pins per net, driver included, drawn uniformly from
-  // [min_fanout, max_fanout]. A net gets one output pin as driver and
-  // fanout-1 sink pins.
+  // Fanout = number of load (sink) pins per net, driver EXCLUDED, drawn
+  // uniformly from [min_fanout, max_fanout]. A net gets one output pin as
+  // driver plus `fanout` sink pins (fanout+1 pins total).
   int min_fanout = 2;
   int max_fanout = 4;
 

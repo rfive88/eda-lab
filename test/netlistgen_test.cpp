@@ -100,14 +100,15 @@ TEST(SyntheticNetlistTest, RespectsSpec)
   EXPECT_EQ(hg.numVertices(), spec.num_insts);
   EXPECT_EQ(hg.numHyperedges(), nets_made);
 
-  // Every net: exactly one driver, fanout within [2, max]. The last nets
-  // may be short of sinks only if the sink pool drained; even then the
-  // driver plus >= 1 sink lower bound of min_fanout=2 can break only on
-  // the final net, so allow >= 2 uniformly and check the upper bound hard.
+  // Every net has one driver plus [min_fanout, max_fanout] sink pins (fanout
+  // excludes the driver), so its total pin count lies in
+  // [min_fanout+1, max_fanout+1]. The last nets may be short of sinks if the
+  // pool drained, but always keep the driver plus >= 1 sink, so >= 2 holds
+  // uniformly; check the upper bound hard.
   for (int e = 0; e < hg.numHyperedges(); ++e) {
-    const int fanout = hg.hyperedgeOffsets()[e + 1] - hg.hyperedgeOffsets()[e];
-    EXPECT_GE(fanout, 2) << "net " << e;
-    EXPECT_LE(fanout, spec.max_fanout) << "net " << e;
+    const int pins = hg.hyperedgeOffsets()[e + 1] - hg.hyperedgeOffsets()[e];
+    EXPECT_GE(pins, 2) << "net " << e;
+    EXPECT_LE(pins, spec.max_fanout + 1) << "net " << e;
   }
 
   // No pin is reused: total hypergraph pins == connected iterms.

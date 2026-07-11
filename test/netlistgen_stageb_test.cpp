@@ -155,6 +155,7 @@ TEST(SignalPinCountTest, ExcludesPowerGround)
   odb::dbMaster* fa = nullptr;
   odb::dbMaster* dff = nullptr;
   odb::dbMaster* dlh = nullptr;
+  odb::dbMaster* clkgate = nullptr;
   for (odb::dbMaster* m : nb.masters()) {
     if (m->getName() == "NAND2_X1") {
       nand2 = m;
@@ -168,12 +169,16 @@ TEST(SignalPinCountTest, ExcludesPowerGround)
     if (m->getName() == "DLH_X1") {
       dlh = m;
     }
+    if (m->getName() == "CLKGATE_X1") {
+      clkgate = m;
+    }
   }
   ASSERT_NE(nand2, nullptr);
   // A1, A2 (in), ZN (out) are SIGNAL; VDD/VSS are POWER/GROUND.
   EXPECT_EQ(signalPinCount(nand2), 3);
   EXPECT_FALSE(isSequentialMaster(nand2));
   EXPECT_FALSE(isLatchMaster(nand2));
+  EXPECT_FALSE(isClockGateMaster(nand2));
 
   // FA_X1: A, B, CI in + CO, S out = 5 signal pins, 2 outputs.
   ASSERT_NE(fa, nullptr);
@@ -186,13 +191,20 @@ TEST(SignalPinCountTest, ExcludesPowerGround)
   // gets excluded, leaving no sequential masters — the reported bug).
   ASSERT_NE(dff, nullptr);
   EXPECT_TRUE(isSequentialMaster(dff));
-  EXPECT_FALSE(isLatchMaster(dff));  // flip-flop, not a latch
+  EXPECT_FALSE(isLatchMaster(dff));       // flip-flop, not a latch
+  EXPECT_FALSE(isClockGateMaster(dff));   // flip-flop, not a clock gate
 
   // DLH_X1: level-sensitive latch (gate pin G, no clock). Classified as a latch
   // so it is dropped entirely — neither sequential nor combinational.
   ASSERT_NE(dlh, nullptr);
   EXPECT_FALSE(isSequentialMaster(dlh));
   EXPECT_TRUE(isLatchMaster(dlh));
+
+  // CLKGATE_X1: integrated clock gate (CK in, E in, GCK gated-clock out). It
+  // carries a clock pin, so it must be flagged as a clock gate (and dropped)
+  // rather than counted as a sequential master.
+  ASSERT_NE(clkgate, nullptr);
+  EXPECT_TRUE(isClockGateMaster(clkgate));
 }
 
 // ---------------------------------------------------------------------------
@@ -263,9 +275,10 @@ TEST(LefGenerationTest, ExcludesMultiOutputMasters)
   }
 }
 
-// Latches (DLH/DLL/TLAT) are used as neither sequential nor combinational, so no
-// instance in any LEF-backed run may be a latch — regardless of sequential_ratio.
-TEST(LefGenerationTest, NeverPlacesLatches)
+// Latches (DLH/DLL/TLAT) and clock-gating cells (CLKGATE/CLKGATETST) are used as
+// neither sequential nor combinational, so no instance in any LEF-backed run may
+// be a latch or a clock gate — regardless of sequential_ratio.
+TEST(LefGenerationTest, NeverPlacesLatchesOrClockGates)
 {
   NetlistBuilder nb("leflatch");
   SyntheticNetlistSpec spec = lefSpec();
@@ -274,6 +287,8 @@ TEST(LefGenerationTest, NeverPlacesLatches)
   ASSERT_GT(nets, 0);
   for (odb::dbInst* inst : nb.block()->getInsts()) {
     EXPECT_FALSE(isLatchMaster(inst->getMaster()))
+        << inst->getMaster()->getName();
+    EXPECT_FALSE(isClockGateMaster(inst->getMaster()))
         << inst->getMaster()->getName();
   }
 }

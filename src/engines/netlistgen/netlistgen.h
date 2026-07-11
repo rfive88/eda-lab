@@ -221,6 +221,12 @@ bool isSequentialMaster(odb::dbMaster* master);
 // neither sequential nor combinational masters.
 bool isLatchMaster(odb::dbMaster* master);
 
+// True if the master is a clock-gating cell (integrated clock gate): it drives a
+// gated-clock OUTPUT pin (named GCK/GCLK/ECK). Even though it carries a clock
+// pin, it is dropped entirely in LEF mode — not used as a sequential (or any)
+// master.
+bool isClockGateMaster(odb::dbMaster* master);
+
 // Config-only spec validation (everything that does not depend on a loaded
 // LEF library): mutual exclusivity of the two combinational modes, the
 // distribution summing to 100, sequential_ratio in [0, 1], and

@@ -106,6 +106,14 @@ bool isLatchEnablePinName(const std::string& name)
   return pinNameIsOneOf(name, {"G", "GN"});
 }
 
+// A clock-gating cell's gated-clock output pin. In Nangate45 GCK is the OUTPUT
+// of exactly the CLKGATE/CLKGATETST cells; GCLK/ECK are the same idea in other
+// libraries. Being an output name, it never collides with a data output.
+bool isGatedClockPinName(const std::string& name)
+{
+  return pinNameIsOneOf(name, {"GCK", "GCLK", "ECK"});
+}
+
 double meanOfTilt(const std::array<double, kNumCombBuckets>& anchors,
                   double theta)
 {
@@ -162,6 +170,17 @@ bool isLatchMaster(odb::dbMaster* master)
   for (odb::dbMTerm* mterm : master->getMTerms()) {
     if (mterm->getIoType() == odb::dbIoType::INPUT
         && isLatchEnablePinName(mterm->getName())) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool isClockGateMaster(odb::dbMaster* master)
+{
+  for (odb::dbMTerm* mterm : master->getMTerms()) {
+    if (mterm->getIoType() == odb::dbIoType::OUTPUT
+        && isGatedClockPinName(mterm->getName())) {
       return true;
     }
   }
@@ -505,15 +524,25 @@ struct GenPlan
   double seq_ratio = 0.0;
 };
 
-// Populate the plan's buckets/anchors from a loaded LEF library. Latches are
-// dropped entirely; multi-output combinational masters and cells with no valid
-// bucket are excluded (all logged).
+// Populate the plan's buckets/anchors from a loaded LEF library. Clock-gating
+// cells and latches are dropped entirely; multi-output combinational masters
+// and cells with no valid bucket are excluded (all logged).
 void populateLefBuckets(NetlistBuilder& builder, GenPlan& plan,
                         utl::Logger* logger)
 {
   std::array<double, kNumCombBuckets> sum{};
   std::array<int, kNumCombBuckets> cnt{};
   for (odb::dbMaster* m : builder.masters()) {
+    // Clock-gating cells carry a clock pin but are not used as sequential (or
+    // any) masters. Checked before isSequentialMaster, which they also satisfy.
+    if (isClockGateMaster(m)) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgExcludeMaster,
+                     "excluding clock-gating master {}: clock gates are not used",
+                     m->getName());
+      }
+      continue;
+    }
     if (isSequentialMaster(m)) {
       plan.seq.push_back(m);
       continue;

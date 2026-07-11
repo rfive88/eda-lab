@@ -105,6 +105,12 @@ Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
     a gate/enable pin (`INPUT` named `G`/`GN`; `isLatchMaster`), which in
     Nangate45 is exactly `DLH`/`DLL`/`TLAT`. Excluded with a log, so they never
     appear as instances.
+  - **Clock-gating cells are dropped entirely too** — they carry a clock pin
+    but are not counted as sequential (or any) masters. A clock gate drives a
+    gated-clock `OUTPUT` pin (named `GCK`/`GCLK`/`ECK`; `isClockGateMaster`),
+    which in Nangate45 is exactly `CLKGATE`/`CLKGATETST`. Checked before the
+    sequential classification (which they would otherwise satisfy) and excluded
+    with a log.
   - A combinational master must resolve to **exactly one output** and
     `(pin_count − 1)` inputs; **multi-output combinational masters are
     excluded** from bucket population (logged). This is a load-bearing

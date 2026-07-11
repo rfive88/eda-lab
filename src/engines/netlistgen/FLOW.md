@@ -93,9 +93,12 @@ a master as sequential if it has a clock pin — a `CLOCK` sig type, or (fallbac
 for libraries like Nangate45 that tag the clock pin `USE SIGNAL`) an input pin
 whose name matches `isClockPinName` (`CK`/`CLK`/`CLOCK`/`CP`). `isLatchMaster`
 flags a non-clocked master with a level-sensitive gate/enable pin
-(`isLatchEnablePinName` = `G`/`GN`) — a latch, dropped entirely. `bucketIndex`
-maps a signal-pin count to bucket 0..4. `maxEntropyDistribution` bisects a
-single `theta` so the tilted distribution's mean hits the target.
+(`isLatchEnablePinName` = `G`/`GN`) — a latch, dropped entirely.
+`isClockGateMaster` flags a master driving a gated-clock output
+(`isGatedClockPinName` = `GCK`/`GCLK`/`ECK`) — a clock gate, also dropped even
+though it has a clock pin. `bucketIndex` maps a signal-pin count to bucket 0..4.
+`maxEntropyDistribution` bisects a single `theta` so the tilted distribution's
+mean hits the target.
 
 ```mermaid
 graph TD
@@ -104,6 +107,7 @@ graph TD
     soc["signalOutputCount(master)"] --> cnt2["count OUTPUT-IoType<br/>signal mterms"]
     seqd["isSequentialMaster(master)"] --> anyck["any mterm SigType == CLOCK<br/>OR INPUT pin named CK/CLK/CLOCK/CP?"]
     latd["isLatchMaster(master)"] --> anyg["no clock pin AND<br/>INPUT pin named G/GN?"]
+    cgd["isClockGateMaster(master)"] --> anygck["OUTPUT pin named GCK/GCLK/ECK?"]
     bi["bucketIndex(pins)"] --> bmap["pins<2 -> -1<br/>pins>=6 -> 4<br/>else pins-2"]
   end
 
@@ -149,7 +153,7 @@ finishes with `formNets` and the post-generation tolerance check.
 ```mermaid
 graph TD
   bp["buildPlan(builder, spec, plan)"] --> lm{"LEF mode?"}
-  lm -->|yes| pop["populateLefBuckets:<br/>clock-pin (sig type or name) -> seq class<br/>latch (G/GN gate, no clock) -> drop (log)<br/>1 output + bucket by signalPinCount<br/>multi-output / no-bucket -> exclude (log)<br/>anchors = measured bucket means"]
+  lm -->|yes| pop["populateLefBuckets:<br/>clock gate (GCK/GCLK/ECK out) -> drop (log)<br/>clock-pin (sig type or name) -> seq class<br/>latch (G/GN gate, no clock) -> drop (log)<br/>1 output + bucket by signalPinCount<br/>multi-output / no-bucket -> exclude (log)<br/>anchors = measured bucket means"]
   lm -->|no| anc["anchors = {2,3,4,5,6}"]
   pop --> rp
   anc --> rp["resolveProbabilities"]

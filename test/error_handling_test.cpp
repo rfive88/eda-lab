@@ -7,8 +7,8 @@
 // Two flavours:
 //   * In-process: call eda::runCliFromFile() directly and check the exit code +
 //     diagnostic. Covers failures that are caught at their source and return
-//     cleanly WITHOUT throwing (missing config file, malformed JSON, missing
-//     output directory).
+//     cleanly WITHOUT throwing (missing config file, malformed JSON, an
+//     auto-created output directory, an uncreatable output directory).
 //   * Subprocess: run the real CLI binaries. Covers failures that surface as a
 //     thrown exception inside OpenROAD (a nonexistent LEF path makes lefin call
 //     utl::Logger::error(), which throws) — the point is to prove the
@@ -132,22 +132,44 @@ TEST(ErrorHandling, MalformedJsonReturnsNonzero)
   std::filesystem::remove(path);
 }
 
-TEST(ErrorHandling, MissingOutputDirectoryReturnsNonzero)
+TEST(ErrorHandling, MissingOutputDirectoryIsCreated)
 {
   // Valid statistical spec (no LEF needed), but the requested DEF output is in
-  // a directory that does not exist. Generation succeeds; the write must fail
-  // cleanly first with a directory diagnostic.
-  const std::string bad_out =
-      (tempPath("no_such_dir_xyz") / "out.def").string();
+  // a directory that does not exist yet. The CLI must create it (including any
+  // missing parents) and succeed, rather than failing on the missing dir.
+  const std::filesystem::path out_dir = tempPath("made_dir_xyz") / "nested";
+  std::filesystem::remove_all(tempPath("made_dir_xyz"));
+  const std::string out = (out_dir / "out.def").string();
+  const std::string cfg = "{\"instance_count\": 200, \"target_avg_fanout\": "
+                          "3.0, \"output_def_path\": \""
+                          + out + "\"}";
+  const std::string path = writeTempFile("made_outdir.json", cfg);
+  std::ostringstream err;
+  const int rc = runCliFromFile(path, err, 0);
+  EXPECT_EQ(rc, 0) << err.str();
+  EXPECT_TRUE(std::filesystem::exists(out));
+  std::filesystem::remove(path);
+  std::filesystem::remove_all(tempPath("made_dir_xyz"));
+}
+
+TEST(ErrorHandling, UncreatableOutputDirectoryReturnsNonzero)
+{
+  // The requested DEF output nests a directory *under an existing regular file*,
+  // so create_directories cannot make it. Generation succeeds; the write must
+  // fail cleanly first with a directory diagnostic — no crash, no partial file.
+  const std::string blocker = writeTempFile("blocker_file", "x");
+  const std::string bad_out = (std::filesystem::path(blocker) / "sub" / "out.def")
+                                  .string();
   const std::string cfg = "{\"instance_count\": 200, \"target_avg_fanout\": "
                           "3.0, \"output_def_path\": \""
                           + bad_out + "\"}";
-  const std::string path = writeTempFile("missing_outdir.json", cfg);
+  const std::string path = writeTempFile("uncreatable_outdir.json", cfg);
   std::ostringstream err;
   const int rc = runCliFromFile(path, err, 0);
   EXPECT_EQ(rc, 1);
-  EXPECT_TRUE(contains(err.str(), "output directory does not exist"));
+  EXPECT_TRUE(contains(err.str(), "cannot create output directory"));
   std::filesystem::remove(path);
+  std::filesystem::remove(blocker);
 }
 
 // ---------------------------------------------------------------------------

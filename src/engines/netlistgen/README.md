@@ -215,9 +215,10 @@ is `utl::Logger`, see "Logging & verbosity" below). JSON is parsed with
 crashes: it produces a clear message and a nonzero exit. `runCliFromFile`
 checks the config file opens, `parseCliConfig` catches the whole
 `nlohmann::json::exception` hierarchy (malformed JSON, wrong field types),
-and before writing, `validateAndWrite` checks each output path's parent
-directory exists — a missing output directory fails fast with no partial
-output. In LEF-backed mode, `NetlistBuilder::loadLef` prechecks each LEF
+and before writing, `validateAndWrite` creates each output path's parent
+directory if it does not exist yet (including missing parents) and only
+fails — cleanly, with no partial output — when a directory genuinely cannot
+be created. In LEF-backed mode, `NetlistBuilder::loadLef` prechecks each LEF
 path (`std::filesystem::exists`) before calling `lefin`, and wraps the
 `lefin` reader calls in a boundary `try/catch` so a present-but-malformed
 LEF — which makes OpenROAD's `createTechAndLib` throw — is contained as a

@@ -39,6 +39,7 @@ constexpr int kMsgValidated = 325;
 constexpr int kMsgWroteDef = 326;
 constexpr int kMsgWroteOdb = 327;
 constexpr int kMsgDone = 328;
+constexpr int kMsgCreatedDir = 329;
 
 }  // namespace
 
@@ -156,17 +157,31 @@ bool parseCliConfig(const std::string& json_text,
 
 namespace {
 
-// A write to `path` needs its containing directory to already exist — an ofstream
-// on a path in a missing directory fails, and OpenROAD's DefOut would otherwise
-// hit that failure deep inside a writer. Check up front and convert to a clean
-// diagnostic. An empty parent (a bare filename in the CWD) is always fine.
-bool outputDirExists(const std::string& path, std::ostream& err)
+// A write to `path` needs its containing directory to exist — an ofstream on a
+// path in a missing directory fails, and OpenROAD's DefOut would otherwise hit
+// that failure deep inside a writer. Create the directory up front (including
+// any missing parents) so a run doesn't fail just because the output dir hasn't
+// been made yet; only a genuine failure to create it (e.g. a path component is
+// a file, or a permission error) is converted to a clean diagnostic. An empty
+// parent (a bare filename in the CWD) needs nothing created.
+bool ensureOutputDir(const std::string& path,
+                     utl::Logger* logger,
+                     std::ostream& err)
 {
   const std::filesystem::path parent = std::filesystem::path(path).parent_path();
-  if (!parent.empty() && !std::filesystem::exists(parent)) {
-    err << "output directory does not exist: " << parent.string()
-        << " (for " << path << ")\n";
+  if (parent.empty() || std::filesystem::exists(parent)) {
+    return true;
+  }
+  std::error_code ec;
+  std::filesystem::create_directories(parent, ec);
+  if (ec) {
+    err << "cannot create output directory: " << parent.string() << " (for "
+        << path << "): " << ec.message() << "\n";
     return false;
+  }
+  if (logger != nullptr) {
+    logger->info(utl::UKN, kMsgCreatedDir, "Created output directory: {}",
+                 parent.string());
   }
   return true;
 }
@@ -183,14 +198,14 @@ bool validateAndWrite(NetlistBuilder& builder,
         << " (refusing to write output)\n";
     return false;
   }
-  // Fail before writing anything if a requested output directory is missing, so
-  // no partial output is produced.
+  // Create any missing output directory before writing, and fail before writing
+  // anything if one cannot be created, so no partial output is produced.
   if (config.output_def_path.has_value()
-      && !outputDirExists(*config.output_def_path, err)) {
+      && !ensureOutputDir(*config.output_def_path, builder.logger(), err)) {
     return false;
   }
   if (config.output_odb_path.has_value()
-      && !outputDirExists(*config.output_odb_path, err)) {
+      && !ensureOutputDir(*config.output_odb_path, builder.logger(), err)) {
     return false;
   }
   if (config.output_def_path.has_value()) {

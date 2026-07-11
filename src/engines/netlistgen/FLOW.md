@@ -298,9 +298,10 @@ via `applyVerbosity`) → parse → `generateSynthetic` (builder shares the logg
 → `estimateDieArea` → `validateAndWrite` → log counts. Each step is an `info`
 phase marker; `-verbosity` surfaces the library's `debugPrint` detail through
 the same logger. `validateAndWrite` gates output on `validateNetlist` (a
-malformed block writes **nothing**, fail-fast) and then checks each requested
-output path's parent directory exists before writing, so a missing output
-directory also fails with no partial output. `main()` in `netlistgen_cli.cpp`
+malformed block writes **nothing**, fail-fast) and then creates each requested
+output path's parent directory (with `create_directories`) if it is missing,
+before writing; only a directory that genuinely cannot be created fails, with
+no partial output. `main()` in `netlistgen_cli.cpp`
 parses the positional config path and the optional `-verbosity <level>` flag,
 then calls `runCliFromFile` inside a top-level `try/catch` backstop (see
 "Error handling" in `CLAUDE.md`).
@@ -328,9 +329,9 @@ graph TD
   die --> vaw["info: Running validation<br/>validateAndWrite(builder, config, err)"]
   vaw --> valid{"validateNetlist ok?"}
   valid -->|no| e1b["err 'validation failed'<br/>write nothing; return 1"]
-  valid -->|yes| odir{"output dirs exist?"}
-  odir -->|no| e1c["err 'output directory does not exist'<br/>write nothing; return 1"]
-  odir -->|yes| wdef["if output_def_path: writeDef (info: Wrote DEF)"]
+  valid -->|yes| odir{"ensureOutputDir:<br/>create missing output dirs"}
+  odir -->|create failed| e1c["err 'cannot create output directory'<br/>write nothing; return 1"]
+  odir -->|ok| wdef["if output_def_path: writeDef (info: Wrote DEF)"]
   wdef --> wodb["if output_odb_path: writeOdb (info: Wrote .odb)"]
   wodb --> counts["info: Done."]
   counts --> ok0["return 0"]

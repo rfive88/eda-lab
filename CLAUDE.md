@@ -204,8 +204,9 @@ an assumed-valid pointer/stream. Two forms coexist and are both valid
 This applies to **library/engine code, not just CLI wrappers**: e.g.
 `NetlistBuilder::loadLef` prechecks each LEF path with
 `std::filesystem::exists` before handing it to `lefin`, and
-`validateAndWrite` checks each output path's parent directory exists
-before writing.
+`validateAndWrite` creates each output path's parent directory
+(`create_directories`) if missing before writing, failing cleanly only
+when a directory genuinely cannot be created.
 
 **Layer 2 — a boundary `try/catch` around OpenROAD reader calls.** This is
 required because of a hard fact about the pinned SHA: `utl::Logger::error()`

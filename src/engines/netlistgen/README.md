@@ -282,10 +282,14 @@ phase markers (parse config → generate → validate → write → done) and, a
 end, a **design summary** (`report()`, no id/prefix): total cell count split
 into combinational vs sequential, the combinational cells' signal-pin-count
 distribution (the `2/3/4/5/6+` buckets), the net count, the average fanout per
-net, and the net fanout (pins-per-net) distribution. Sequential cells are counted via
-`isSequentialMaster`, so the split is correct in both LEF mode (flip-flops by
-clock pin) and synthetic mode (the `SEQ` representative carries a real clock
-pin). Hard errors go to stderr. `-verbosity <level>` (group
+net, and the net fanout distribution. Fanout is the number of **load (sink)
+pins**, i.e. net pins **excluding the driver** (computed as total pins minus the
+OUTPUT driver pins), for both the average and the distribution. The
+distribution shows one row per fanout up to 9, then collapses `10-50` and `>50`
+into single rows so large-fanout nets keep the table compact. Sequential cells
+are counted via `isSequentialMaster`, so the split is correct in both LEF mode
+(flip-flops by clock pin) and synthetic mode (the `SEQ` representative carries a
+real clock pin). Hard errors go to stderr. `-verbosity <level>` (group
 `"netlistgen"`) raises detail across the whole run: **1** adds the resolved
 plan (bucket probabilities, sequential masters) and achieved-vs-requested
 statistics unconditionally (not just on a tolerance miss); **2** adds

@@ -188,16 +188,18 @@ bool ensureOutputDir(const std::string& path,
   return true;
 }
 
-// Cap on distinct net-fanout rows printed in the summary, so a design with a
-// very wide fanout range cannot emit an unbounded table (min/max/mean still
-// convey the spread in that case).
-constexpr std::size_t kMaxFanoutRows = 20;
+// Fanout-histogram bucketing: fanouts below kFanoutBucketLo get one row each;
+// [kFanoutBucketLo, kFanoutBucketHi] collapse into a single "10-50" row and
+// anything above kFanoutBucketHi into a ">50" row, so a design with large-fanout
+// nets stays a compact table instead of one row per distinct value.
+constexpr int kFanoutBucketLo = 10;
+constexpr int kFanoutBucketHi = 50;
 
 // Print a statistics summary of the generated design as the run's final,
 // default-visible output: cell counts (combinational vs sequential), the
 // combinational cells' signal-pin-count distribution, the net count, and the
-// net fanout (pins-per-net) distribution. Emitted via report() (level OFF, no
-// id/prefix) so it reads as a clean block; nothing here is gated on verbosity.
+// net fanout distribution. Emitted via report() (level OFF, no id/prefix) so it
+// reads as a clean block; nothing here is gated on verbosity.
 void reportDesignSummary(odb::dbBlock* block, utl::Logger& logger)
 {
   // Cells: split combinational vs sequential, and histogram the combinational
@@ -220,13 +222,22 @@ void reportDesignSummary(odb::dbBlock* block, utl::Logger& logger)
   }
   const int total = seq + comb;
 
-  // Nets: fanout is the pin count on the net (driver + sinks), matching the
-  // generator's fanout definition.
+  // Nets: fanout is the number of load (sink) pins the net drives — i.e. its
+  // pins EXCLUDING the driver. Compute it as total pins minus the OUTPUT
+  // (driver) pins, so the driver is never counted regardless of net shape.
   const int num_nets = static_cast<int>(block->getNets().size());
   std::map<int, int> fanout_hist;
   long fanout_sum = 0;
   for (odb::dbNet* net : block->getNets()) {
-    const int fanout = static_cast<int>(net->getITerms().size());
+    int pins = 0;
+    int drivers = 0;
+    for (odb::dbITerm* iterm : net->getITerms()) {
+      ++pins;
+      if (iterm->getIoType() == odb::dbIoType::OUTPUT) {
+        ++drivers;
+      }
+    }
+    const int fanout = pins - drivers;
     ++fanout_hist[fanout];
     fanout_sum += fanout;
   }
@@ -245,16 +256,30 @@ void reportDesignSummary(odb::dbBlock* block, utl::Logger& logger)
   logger.report("Nets: {}", num_nets);
   if (num_nets > 0) {
     const double avg = static_cast<double>(fanout_sum) / num_nets;
-    logger.report("Average fanout per net: {:.2f} pins", avg);
-    logger.report("Net fanout distribution (pins per net):");
-    if (fanout_hist.size() <= kMaxFanoutRows) {
-      for (const auto& [fanout, count] : fanout_hist) {
-        const double pct = 100.0 * count / num_nets;
-        logger.report("    fanout {:>3}: {:6d}  ({:5.1f}%)", fanout, count, pct);
+    logger.report("Average fanout per net: {:.2f} (driver excluded)", avg);
+    logger.report("Net fanout distribution (loads per net, driver excluded):");
+    const auto printRow = [&](const std::string& label, long count) {
+      logger.report("    fanout {:>5}: {:6d}  ({:5.1f}%)", label, count,
+                    100.0 * count / num_nets);
+    };
+    long mid = 0;   // fanout in [kFanoutBucketLo, kFanoutBucketHi]
+    long high = 0;  // fanout > kFanoutBucketHi
+    for (const auto& [fanout, count] : fanout_hist) {
+      if (fanout < kFanoutBucketLo) {
+        printRow(std::to_string(fanout), count);
+      } else if (fanout <= kFanoutBucketHi) {
+        mid += count;
+      } else {
+        high += count;
       }
-    } else {
-      logger.report("    ({} distinct fanout values; average above)",
-                    fanout_hist.size());
+    }
+    if (mid > 0) {
+      printRow(std::to_string(kFanoutBucketLo) + "-"
+                   + std::to_string(kFanoutBucketHi),
+               mid);
+    }
+    if (high > 0) {
+      printRow(">" + std::to_string(kFanoutBucketHi), high);
     }
   }
   logger.report("==========================");

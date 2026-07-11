@@ -56,5 +56,19 @@ int main(int argc, char** argv)
                          "missing required argument <config.json>");
     return 1;
   }
-  return eda::runCliFromFile(config_path, std::cerr, verbosity);
+
+  // Top-level backstop for ordinary catchable exceptions (std::bad_alloc, an
+  // STL throw, a bug this audit missed). NOTE: an odb utl::Logger::error()
+  // throw is NOT reliably catchable this far up — unwinding it to main() fails
+  // and crashes — so odb throws are contained at the reader boundary inside
+  // NetlistBuilder::loadLef(), and missing files are prechecked before that.
+  try {
+    return eda::runCliFromFile(config_path, std::cerr, verbosity);
+  } catch (const std::exception& e) {
+    std::cerr << "Fatal error: " << e.what() << std::endl;
+    return 1;
+  } catch (...) {
+    std::cerr << "Fatal error: unknown exception." << std::endl;
+    return 1;
+  }
 }

@@ -21,6 +21,16 @@ list. `verbosityOption()` supplies the shared `-verbosity` wording. Used by
 `hello_odb` and `netlistgen_cli`; `test/cli_help_test.cpp` enforces the
 single-source-of-truth guarantee.
 
+`status.h` is the single source of truth for the graceful error-handling
+convention (see "Error handling" in `CLAUDE.md`). Header-only: an
+`eda::ErrorCode` enum plus a `[[nodiscard]] eda::Status { code, message }`
+value, with `okStatus()` / `makeError(code, msg)` helpers. It is the
+go-forward standard for propagating expected, recoverable failures (bad
+file paths, malformed input, load failures) up to `main()` as a value
+rather than a crash; the older `bool`+message / `int`-exit idiom in
+netlistgen is grandfathered and equally valid. Used by `hello_odb`;
+`test/error_handling_test.cpp` exercises the convention end to end.
+
 `ord_shim.cpp` provides inert definitions of `ord::getLogger()` and
 `ord::OpenRoad::openRoad()` (both return `nullptr`). Some `utl.a` members
 (the swig/Tcl wrappers, LoggerCommon) reference these

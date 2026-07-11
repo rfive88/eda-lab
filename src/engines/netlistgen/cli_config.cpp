@@ -3,6 +3,7 @@
 #include "engines/netlistgen/cli_config.h"
 
 #include <array>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -137,8 +138,11 @@ bool parseCliConfig(const std::string& json_text,
     if (j.contains("output_odb_path") && !j.at("output_odb_path").is_null()) {
       out.output_odb_path = j.at("output_odb_path").get<std::string>();
     }
-  } catch (const json::type_error& e) {
-    error = std::string("config field has wrong type: ") + e.what();
+  } catch (const json::exception& e) {
+    // Widened from json::type_error to the whole json::exception hierarchy so a
+    // future edit that adds an unchecked .at() (json::out_of_range) or similar
+    // still fails cleanly here instead of escaping as an uncaught exception.
+    error = std::string("config field error: ") + e.what();
     return false;
   }
 
@@ -150,6 +154,25 @@ bool parseCliConfig(const std::string& json_text,
   return true;
 }
 
+namespace {
+
+// A write to `path` needs its containing directory to already exist — an ofstream
+// on a path in a missing directory fails, and OpenROAD's DefOut would otherwise
+// hit that failure deep inside a writer. Check up front and convert to a clean
+// diagnostic. An empty parent (a bare filename in the CWD) is always fine.
+bool outputDirExists(const std::string& path, std::ostream& err)
+{
+  const std::filesystem::path parent = std::filesystem::path(path).parent_path();
+  if (!parent.empty() && !std::filesystem::exists(parent)) {
+    err << "output directory does not exist: " << parent.string()
+        << " (for " << path << ")\n";
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
 bool validateAndWrite(NetlistBuilder& builder,
                       const CliConfig& config,
                       std::ostream& err)
@@ -158,6 +181,16 @@ bool validateAndWrite(NetlistBuilder& builder,
   if (!v.ok) {
     err << "netlist validation failed: " << v.message
         << " (refusing to write output)\n";
+    return false;
+  }
+  // Fail before writing anything if a requested output directory is missing, so
+  // no partial output is produced.
+  if (config.output_def_path.has_value()
+      && !outputDirExists(*config.output_def_path, err)) {
+    return false;
+  }
+  if (config.output_odb_path.has_value()
+      && !outputDirExists(*config.output_odb_path, err)) {
     return false;
   }
   if (config.output_def_path.has_value()) {

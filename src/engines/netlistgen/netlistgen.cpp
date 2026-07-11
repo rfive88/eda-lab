@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <random>
 
 #include "odb/db.h"
@@ -269,34 +270,62 @@ bool NetlistBuilder::loadLef(const std::string& tech_lef_path,
                   "loadLef called on an already-initialised builder");
     return false;
   }
-  // createTechAndLib is a 3-arg call (tech_name, lib_name, lef_file); the
-  // tech LEF doubles as the source of any macros it happens to define.
-  odb::lefin reader(db_, logger_, /*ignore_non_routing_layers=*/false);
-  odb::dbLib* tech_lib =
-      reader.createTechAndLib("tech", "tech_lib", tech_lef_path.c_str());
-  if (tech_lib == nullptr) {
-    logger_->warn(utl::UKN, kMsgLefLoad, "failed to load tech LEF {}",
+  // Check each LEF exists BEFORE handing it to lefin: on a missing/unreadable
+  // file OpenROAD's createTechAndLib calls logger->error(), which THROWS
+  // (see support/logging.h) — and with utl's swig error path linked in that
+  // unwinds into a crash. Prechecking keeps a missing path an ordinary
+  // return-false failure at its source rather than a thrown exception.
+  if (!std::filesystem::exists(tech_lef_path)) {
+    logger_->warn(utl::UKN, kMsgLefLoad, "tech LEF not found: {}",
                   tech_lef_path);
     return false;
   }
-  odb::dbTech* tech = tech_lib->getTech();
-  int idx = 0;
   for (const std::string& cell_lef : cell_lef_paths) {
-    odb::dbLib* lib = reader.createLib(
-        tech, ("cells" + std::to_string(idx++)).c_str(), cell_lef.c_str());
-    if (lib == nullptr) {
-      logger_->warn(utl::UKN, kMsgLefLoad, "failed to load cell LEF {}",
-                    cell_lef);
+    if (!std::filesystem::exists(cell_lef)) {
+      logger_->warn(utl::UKN, kMsgLefLoad, "cell LEF not found: {}", cell_lef);
       return false;
     }
   }
-  // Masters loaded by lefin arrive already frozen (lefinReader freezes each
-  // MACRO at END; verified against the pinned SHA), so no setFrozen() here —
-  // unlike the synthetic path where NetlistBuilder freezes explicitly.
-  odb::dbChip* chip = odb::dbChip::create(db_, tech, design_name_);
-  block_ = odb::dbBlock::create(chip, design_name_.c_str());
-  tech_ready_ = true;
-  return true;
+  // Wrap the reader calls in a try/catch AT this boundary. A present-but-
+  // malformed LEF makes lefin call logger->error(), which throws; catching it
+  // here — close to the throw, where the stack unwinds cleanly — keeps it an
+  // ordinary return-false failure. (A catch further up, e.g. in the CLI's
+  // main(), does NOT contain an odb throw: unwinding it that far fails and
+  // crashes. The handler must sit near the reader call.)
+  try {
+    // createTechAndLib is a 3-arg call (tech_name, lib_name, lef_file); the
+    // tech LEF doubles as the source of any macros it happens to define.
+    odb::lefin reader(db_, logger_, /*ignore_non_routing_layers=*/false);
+    odb::dbLib* tech_lib =
+        reader.createTechAndLib("tech", "tech_lib", tech_lef_path.c_str());
+    if (tech_lib == nullptr) {
+      logger_->warn(utl::UKN, kMsgLefLoad, "failed to load tech LEF {}",
+                    tech_lef_path);
+      return false;
+    }
+    odb::dbTech* tech = tech_lib->getTech();
+    int idx = 0;
+    for (const std::string& cell_lef : cell_lef_paths) {
+      odb::dbLib* lib = reader.createLib(
+          tech, ("cells" + std::to_string(idx++)).c_str(), cell_lef.c_str());
+      if (lib == nullptr) {
+        logger_->warn(utl::UKN, kMsgLefLoad, "failed to load cell LEF {}",
+                      cell_lef);
+        return false;
+      }
+    }
+    // Masters loaded by lefin arrive already frozen (lefinReader freezes each
+    // MACRO at END; verified against the pinned SHA), so no setFrozen() here —
+    // unlike the synthetic path where NetlistBuilder freezes explicitly.
+    odb::dbChip* chip = odb::dbChip::create(db_, tech, design_name_);
+    block_ = odb::dbBlock::create(chip, design_name_.c_str());
+    tech_ready_ = true;
+    return true;
+  } catch (const std::exception& e) {
+    logger_->warn(utl::UKN, kMsgLefLoad, "LEF load failed for {}: {}",
+                  tech_lef_path, e.what());
+    return false;
+  }
 }
 
 std::vector<odb::dbMaster*> NetlistBuilder::masters() const

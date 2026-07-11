@@ -211,6 +211,19 @@ is `utl::Logger`, see "Logging & verbosity" below). JSON is parsed with
 **`nlohmann::json`** (header-only, pulled via CMake `FetchContent` pinned to
 `v3.11.3`).
 
+**Graceful failure (see "Error handling" in `CLAUDE.md`).** Bad input never
+crashes: it produces a clear message and a nonzero exit. `runCliFromFile`
+checks the config file opens, `parseCliConfig` catches the whole
+`nlohmann::json::exception` hierarchy (malformed JSON, wrong field types),
+and before writing, `validateAndWrite` checks each output path's parent
+directory exists — a missing output directory fails fast with no partial
+output. In LEF-backed mode, `NetlistBuilder::loadLef` prechecks each LEF
+path (`std::filesystem::exists`) before calling `lefin`, and wraps the
+`lefin` reader calls in a boundary `try/catch` so a present-but-malformed
+LEF — which makes OpenROAD's `createTechAndLib` throw — is contained as a
+`return false` rather than a segfault. `netlistgen_cli`'s `main()` adds a
+top-level catch-all backstop over the whole run.
+
 Mode A example (explicit distribution, LEF-backed, both outputs):
 
 ```json

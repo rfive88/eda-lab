@@ -50,3 +50,11 @@ missing required argument prints the same usage block and exits nonzero.
 Per-option detail (defaults, ranges, examples) lives in each engine's own
 README under "Command-Line Options"; the shared renderer is
 `src/support/cli.h`.
+
+Bad input fails gracefully, never with a crash: a missing or malformed
+LEF/DEF/config, or a missing output directory, produces a clear message
+and a nonzero exit code. Expected failures are propagated as explicit
+return values (`src/support/status.h`), OpenROAD's throwing
+`utl::Logger::error()` is contained at the reader boundary, and every CLI
+`main()` carries a top-level catch-all backstop. See `CLAUDE.md` for the
+full convention.

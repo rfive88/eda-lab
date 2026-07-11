@@ -175,6 +175,75 @@ the single-source-of-truth guarantee (unit-tests the renderer and spawns
 both CLIs). There is no partitioner CLI yet (library/test-only); when one
 is added it uses this helper from the start.
 
+## Error handling (STANDING CONVENTION)
+
+Expected, recoverable failures — a file path that does not exist, a
+malformed config, a LEF/DEF that fails to parse, a missing output
+directory — are surfaced as a **value that propagates to `main()` and
+produces a clean message + nonzero exit**, never a crash. New code applies
+this wherever possible. There are three layers; the first two are
+load-bearing, the third is a backstop.
+
+**Layer 1 — check expected failures at the point they occur.** Prefer to
+prevent the failure over catching it: a function that can hit an expected
+failure checks for it and returns a failure value rather than proceeding on
+an assumed-valid pointer/stream. Two forms coexist and are both valid
+"explicit return-value" propagation:
+
+- `eda::Status` / `eda::ErrorCode` (`src/support/status.h`, header-only,
+  `[[nodiscard]]`) — the go-forward standard for new code. A `Status`
+  carries a coarse `ErrorCode` plus a human-readable `message`; callers
+  check `.ok()` and early-return. Because it is `[[nodiscard]]`, an
+  ignored failure is a compiler warning, not a silent bug. `hello_odb`
+  uses it.
+- `bool` + a `std::string& error` out-param (or an `int` process exit
+  code at the CLI boundary) — the pre-existing idiom in netlistgen's
+  `cli_config` / `runCliFromFile` and `NetlistBuilder`. Grandfathered and
+  equally acceptable; a `bool`+message maps trivially onto a `Status`.
+
+This applies to **library/engine code, not just CLI wrappers**: e.g.
+`NetlistBuilder::loadLef` prechecks each LEF path with
+`std::filesystem::exists` before handing it to `lefin`, and
+`validateAndWrite` checks each output path's parent directory exists
+before writing.
+
+**Layer 2 — a boundary `try/catch` around OpenROAD reader calls.** This is
+required because of a hard fact about the pinned SHA: `utl::Logger::error()`
+**throws `std::runtime_error`** (and `critical()` calls `exit()`; see
+`src/support/logging.h`). OpenROAD's `lefin`/`defin` call `error()` on a
+malformed (but present) file, so the throw comes from *inside* odb.
+**Empirically, that throw is NOT catchable from `main()`** — unwinding an
+odb exception all the way up fails and calls `std::terminate` (or, with
+utl's swig error path linked in, segfaults). It **is** catchable by a
+`try/catch` placed right at the reader call, where the stack still unwinds
+cleanly. So every call into an OpenROAD reader that can fail is wrapped in
+a local `try/catch` that converts the exception to a `Status`/`bool`
+failure (see `loadDesign` in `hello_odb.cpp` and `NetlistBuilder::loadLef`).
+Missing-file prechecks (layer 1) keep the common case from ever throwing;
+the boundary catch covers present-but-malformed files.
+
+**Layer 3 — a top-level `try/catch` in every `main()`.** A catch-all
+(`catch (const std::exception&)` + `catch (...)`) wrapping a thin
+`runXxxCli(argc, argv)` worker. This is the backstop for ordinary
+catchable exceptions (`std::bad_alloc`, an STL throw, a bug this audit
+missed) — NOT for odb `error()` throws, which layer 2 already contains at
+their source. `main()` stays a thin wrapper so the worker is unit-testable
+by return code without spawning a subprocess.
+
+Reconciliation with "no exceptions across engine APIs": eda-lab's own APIs
+still never throw — they return `Status`/`bool`. The exception machinery
+here exists only to contain OpenROAD's throwing `error()` at the odb
+boundary and as a last-resort backstop; library code still signals its own
+failures by return value and uses `warn()`, never `error()`/`critical()`.
+
+Additive-only, like the other conventions: behavior on valid input is
+unchanged. `test/error_handling_test.cpp` enforces it — in-process cases
+call `runCliFromFile` (missing config, malformed JSON, missing output
+dir); subprocess cases spawn the real binaries via `fork`/`execv` (so a
+crash is detectable as a signal death, not masked by a shell) for
+nonexistent and malformed LEF, confirming a clean nonzero exit rather than
+an abort/segfault.
+
 ## Layout
 
 - `src/dbio/hello_odb.cpp` — LEF/DEF round-trip smoke test against OpenDB.
@@ -182,6 +251,8 @@ is added it uses this helper from the start.
   confirmed `utl::Logger` API notes, level constants, `applyVerbosity()`.
 - `src/support/cli.h` — the CLI `--help`/usage convention above: `CliSpec`,
   `CliOption`, `printHelp`/`printUsageError`/`wantsHelp`, `verbosityOption()`.
+- `src/support/status.h` — the error-handling convention above: `Status`,
+  `ErrorCode`, `okStatus()`/`makeError()` (header-only, `[[nodiscard]]`).
 - `src/hypergraph/` — hypergraph netlist model (see below).
 - `src/support/ord_shim.cpp` — inert `ord::getLogger`/`ord::OpenRoad::openRoad`
   definitions so links survive when utl.a's Tcl-wrapper objects get pulled in.

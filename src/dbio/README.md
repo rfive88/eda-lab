@@ -12,6 +12,19 @@ end to end:
 Every step above is an `info`-level `utl::Logger` phase marker (no
 `std::cout`), per the repo logging convention.
 
+**Graceful failure (see "Error handling" in `CLAUDE.md`).** Bad input never
+crashes. The work lives in a testable `runHelloOdb(argc, argv)`; `main()`
+is a thin `try/catch` backstop over it. `loadDesign` prechecks that each of
+the three input files exists before touching `lefin`/`defin` (a missing
+file becomes an `eda::Status` `FileNotFound`, not a thrown OpenROAD error),
+and wraps the reader calls in a boundary `try/catch` so a present-but-
+malformed LEF/DEF — which makes OpenROAD's readers throw — is reported as a
+`Status` and a clean nonzero exit rather than an abort. It also null-checks
+every `lefin` return before dereferencing, and (because `defin::readChip`
+destroys the passed chip on failure) detects DEF-read failure via
+`db->getChip()` rather than the now-dangling local pointer. Output stream
+opens and the DEF-writer return are checked too.
+
 ## Usage
 
 Run from the `run/` directory so `out.odb`/`out.def` land there, not in the

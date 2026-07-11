@@ -114,6 +114,20 @@ target_compile_definitions(cli_help_test
 target_link_libraries(cli_help_test PRIVATE GTest::gtest GTest::gtest_main)
 add_dependencies(cli_help_test hello_odb netlistgen_cli)
 
+# Graceful error-handling convention: confirms bad inputs (missing config,
+# malformed JSON, missing output dir, nonexistent LEF) produce clean nonzero
+# exits with a message, never a crash. In-process cases call runCliFromFile;
+# subprocess cases spawn the real binaries to exercise main()'s top-level catch.
+add_executable(error_handling_test test/error_handling_test.cpp)
+target_include_directories(error_handling_test PRIVATE src)
+target_compile_definitions(error_handling_test
+                           PRIVATE HELLO_ODB_BIN="$<TARGET_FILE:hello_odb>"
+                                   NETLISTGEN_CLI_BIN="$<TARGET_FILE:netlistgen_cli>")
+target_link_libraries(error_handling_test PRIVATE netlistgen_cli_core
+                                                  netlistgen odb utl
+                                                  GTest::gtest GTest::gtest_main)
+add_dependencies(error_handling_test hello_odb netlistgen_cli)
+
 include(GoogleTest)
 add_test(NAME hypergraph_test COMMAND hypergraph_test)
 add_test(NAME netlistgen_test COMMAND netlistgen_test)
@@ -122,3 +136,4 @@ add_test(NAME netlistgen_link_smoke COMMAND netlistgen_link_smoke)
 add_test(NAME netlistgen_stagec_test COMMAND netlistgen_stagec_test)
 add_test(NAME fm_partitioner_test COMMAND fm_partitioner_test)
 add_test(NAME cli_help_test COMMAND cli_help_test)
+add_test(NAME error_handling_test COMMAND error_handling_test)

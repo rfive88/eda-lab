@@ -47,10 +47,18 @@ graph TD
 Owns the `dbDatabase` lifetime and the two tech-setup paths. Synthetic
 tech/lib/chip/block is created lazily by `ensureSyntheticTech()` on first
 `makeMaster`/`makeInst`/`makeNet` (preserving Stage A's direct-use tests).
-`loadLef()` takes the LEF path instead: `lefin::createTechAndLib` builds the
-tech (3-arg call), `createLib` adds each cell LEF, then chip+block are
-created. LEF masters arrive already frozen from `lefin`; synthetic masters
-are frozen explicitly. A builder is one path or the other (`tech_ready_`).
+`loadLef()` takes the LEF path instead: it first prechecks each LEF path
+with `std::filesystem::exists` (a missing file becomes `warn + return false`
+rather than a thrown-and-crashing `lefin` error), then, inside a boundary
+`try/catch`, `lefin::createTechAndLib` builds the tech (3-arg call),
+`createLib` adds each cell LEF, and chip+block are created. The
+`try/catch` contains a present-but-malformed LEF: OpenROAD's
+`createTechAndLib` calls `logger->error()`, which throws, and catching it
+here (close to the call) keeps it a `return false` instead of a segfault —
+a catch further up in the CLI's `main()` does not work (see "Error
+handling" in `CLAUDE.md`). LEF masters arrive already frozen from `lefin`;
+synthetic masters are frozen explicitly. A builder is one path or the
+other (`tech_ready_`).
 
 ```mermaid
 graph TD
@@ -63,10 +71,13 @@ graph TD
 
   ll["loadLef(tech_lef, cell_lefs)"] --> chk{"tech_ready_?"}
   chk -->|yes| fail0["warn + return false"]
-  chk -->|no| ct["lefin.createTechAndLib(tech, tech_lib, tech_lef)"]
+  chk -->|no| exist{"all LEF paths exist?"}
+  exist -->|no| fail0
+  exist -->|yes| ct["try: lefin.createTechAndLib(tech, tech_lib, tech_lef)"]
   ct -->|null| fail1["warn + return false"]
+  ct -->|throws| fail1
   ct --> cl["for each cell_lef: lefin.createLib(tech, ...)"]
-  cl -->|null| fail1
+  cl -->|null / throws| fail1
   cl --> mkblk["dbChip::create + dbBlock::create<br/>tech_ready_ = true (masters pre-frozen)"]
   mkblk --> ok[return true]
 
@@ -286,10 +297,13 @@ pipeline: create a shared `utl::Logger` (verbosity from the `-verbosity` flag
 via `applyVerbosity`) → parse → `generateSynthetic` (builder shares the logger)
 → `estimateDieArea` → `validateAndWrite` → log counts. Each step is an `info`
 phase marker; `-verbosity` surfaces the library's `debugPrint` detail through
-the same logger. `validateAndWrite` gates output on `validateNetlist`, so a
-malformed block writes **nothing** (fail-fast). `main()` in `netlistgen_cli.cpp`
+the same logger. `validateAndWrite` gates output on `validateNetlist` (a
+malformed block writes **nothing**, fail-fast) and then checks each requested
+output path's parent directory exists before writing, so a missing output
+directory also fails with no partial output. `main()` in `netlistgen_cli.cpp`
 parses the positional config path and the optional `-verbosity <level>` flag,
-then calls `runCliFromFile`.
+then calls `runCliFromFile` inside a top-level `try/catch` backstop (see
+"Error handling" in `CLAUDE.md`).
 
 ```mermaid
 graph TD
@@ -314,10 +328,14 @@ graph TD
   die --> vaw["info: Running validation<br/>validateAndWrite(builder, config, err)"]
   vaw --> valid{"validateNetlist ok?"}
   valid -->|no| e1b["err 'validation failed'<br/>write nothing; return 1"]
-  valid -->|yes| wdef["if output_def_path: writeDef (info: Wrote DEF)"]
+  valid -->|yes| odir{"output dirs exist?"}
+  odir -->|no| e1c["err 'output directory does not exist'<br/>write nothing; return 1"]
+  odir -->|yes| wdef["if output_def_path: writeDef (info: Wrote DEF)"]
   wdef --> wodb["if output_odb_path: writeOdb (info: Wrote .odb)"]
   wodb --> counts["info: Done."]
   counts --> ok0["return 0"]
+
+  run -.->|any escaping std::exception| bck["main() catch-all:<br/>'Fatal error'; return 1"]
 ```
 
 ### CLI parse mapping

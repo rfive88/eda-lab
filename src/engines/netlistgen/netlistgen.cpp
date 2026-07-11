@@ -283,17 +283,20 @@ bool validateSpecConfig(const SyntheticNetlistSpec& spec, utl::Logger* logger)
       return false;
     }
   } else {
-    // Mode B synthetic-anchor range check. In LEF mode the range is
-    // re-checked against measured anchors during plan building.
-    const double t = *spec.target_avg_fanout;
+    // Mode B synthetic-anchor range check. target_avg_fanout is a FANOUT (load
+    // pins per net, i.e. signal pins excluding the single driver/output pin), so
+    // it maps onto the pin-count anchors as fanout + 1. Equivalently, the valid
+    // fanout range is the anchor range shifted down by one. In LEF mode the
+    // range is re-checked against measured anchors during plan building.
+    const double t_pins = *spec.target_avg_fanout + 1.0;
     const double lo = kSyntheticBucketAnchors.front();
     const double hi = kSyntheticBucketAnchors.back();
-    if (!spec.tech_lef_path.has_value() && (t <= lo || t >= hi)) {
+    if (!spec.tech_lef_path.has_value() && (t_pins <= lo || t_pins >= hi)) {
       if (logger) {
         logger->warn(utl::UKN, kMsgTargetRange,
                      "target_avg_fanout must be strictly inside ({}, {}), "
                      "got {}",
-                     lo, hi, t);
+                     lo - 1.0, hi - 1.0, *spec.target_avg_fanout);
       }
       return false;
     }
@@ -603,24 +606,28 @@ bool resolveProbabilities(const SyntheticNetlistSpec& spec, GenPlan& plan,
     }
     return true;
   }
-  const double target = *spec.target_avg_fanout;
+  // target_avg_fanout is a fanout (load pins, driver excluded); the anchors are
+  // signal-pin counts (driver included), so the equivalent pin-count target is
+  // fanout + 1.
+  const double target_fanout = *spec.target_avg_fanout;
+  const double target_pins = target_fanout + 1.0;
   const double lo = *std::min_element(plan.anchors.begin(), plan.anchors.end());
   const double hi = *std::max_element(plan.anchors.begin(), plan.anchors.end());
-  if (target <= lo || target >= hi) {
+  if (target_pins <= lo || target_pins >= hi) {
     if (logger) {
       logger->warn(utl::UKN, kMsgTargetRange,
-                   "target_avg_fanout {} is outside the measured anchor "
+                   "target_avg_fanout {} is outside the measured fanout "
                    "range ({}, {})",
-                   target, lo, hi);
+                   target_fanout, lo - 1.0, hi - 1.0);
     }
     return false;
   }
-  plan.prob = maxEntropyDistribution(plan.anchors, target);
+  plan.prob = maxEntropyDistribution(plan.anchors, target_pins);
   if (logger) {
     logger->info(utl::UKN, kMsgDerivedDist,
-                 "max-entropy bucket distribution for target {}: "
+                 "max-entropy bucket distribution for fanout target {}: "
                  "[{:.3f}, {:.3f}, {:.3f}, {:.3f}, {:.3f}]",
-                 target, plan.prob[0], plan.prob[1], plan.prob[2],
+                 target_fanout, plan.prob[0], plan.prob[1], plan.prob[2],
                  plan.prob[3], plan.prob[4]);
   }
   return true;
@@ -862,15 +869,17 @@ int generateStatistical(NetlistBuilder& builder,
   }
   if (spec.target_avg_fanout.has_value() && comb_total > 0) {
     // The pin-count distribution controls the mean signal-pin count of the
-    // combinational instances (which is what net formation later draws
-    // from). Compare that mean against the Mode-B target; actual per-net
-    // fanout is still governed by [min_fanout, max_fanout] this stage.
-    const double obs_mean = static_cast<double>(comb_signal_pins) / comb_total;
-    if (std::abs(obs_mean - *spec.target_avg_fanout) > tol) {
+    // combinational instances. target_avg_fanout is a fanout (driver excluded),
+    // so compare the observed mean fanout = mean signal-pin count minus the one
+    // driver pin. (Actual per-net fanout is still governed by
+    // [min_fanout, max_fanout] this stage.)
+    const double obs_fanout =
+        static_cast<double>(comb_signal_pins) / comb_total - 1.0;
+    if (std::abs(obs_fanout - *spec.target_avg_fanout) > tol) {
       logger->warn(utl::UKN, kMsgTolerance,
-                   "empirical mean combinational signal-pin count {:.3f} "
+                   "empirical mean combinational fanout {:.3f} "
                    "deviates from target_avg_fanout {:.3f}",
-                   obs_mean, *spec.target_avg_fanout);
+                   obs_fanout, *spec.target_avg_fanout);
     }
   }
   return nets_made;

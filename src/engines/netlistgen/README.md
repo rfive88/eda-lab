@@ -84,13 +84,16 @@ Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
   - **Mode A — forward:** `combinational_pin_distribution`, five percentages
     that must sum to 100.
   - **Mode B — inverse:** `target_avg_fanout`, the desired average
-    signal-pin count. The generator back-solves the **maximum-entropy**
-    distribution `p_i = exp(θ·xᵢ)/Σ exp(θ·xⱼ)` over the bucket anchors `xᵢ`
-    whose weighted mean equals the target — a single scalar `θ` found by
-    bisection (`maxEntropyDistribution`, plain `<cmath>`). This spreads mass
-    across all buckets as evenly as the mean constraint allows, with no
-    user-supplied prior. The derived distribution is logged. The target must
-    lie strictly inside the anchor range (synthetic: `(2, 6)`).
+    **fanout** — load pins per net, i.e. a cell's signal pins **excluding its
+    one driver/output pin** (`#pins − 1`). Since the bucket anchors `xᵢ` are
+    signal-pin **counts** (driver included), the equivalent pin-count target is
+    `fanout + 1`, and the generator back-solves the **maximum-entropy**
+    distribution `p_i = exp(θ·xᵢ)/Σ exp(θ·xⱼ)` over the anchors whose weighted
+    mean equals that — a single scalar `θ` found by bisection
+    (`maxEntropyDistribution`, plain `<cmath>`). This spreads mass across all
+    buckets as evenly as the mean constraint allows, with no user-supplied
+    prior. The derived distribution is logged. The target must lie strictly
+    inside the fanout range: the anchor range minus one (synthetic: `(1, 5)`).
 - **Sequential cells** get one fixed representative profile this stage
   (synthetic: `D, CK, Q` = 3 signal pins, with `CK` a real `dbSigType::CLOCK`
   pin so the cell reads as sequential via `isSequentialMaster`). No pin-count
@@ -323,7 +326,7 @@ Consumed downstream by `Hypergraph::buildFromBlock()`.
 | `cell_lef_paths` | `std::vector<std::string>` | `{}` | Extra cell LEF(s) against that tech. |
 | `sequential_ratio` | `std::optional<double>` | unset (→ 0.0) | Fraction of instances that are sequential. |
 | `combinational_pin_distribution` | `std::optional<array<double,5>>` | unset | Mode A percentages `[2,3,4,5,6+]`, sum 100. |
-| `target_avg_fanout` | `std::optional<double>` | unset | Mode B target mean signal-pin count. |
+| `target_avg_fanout` | `std::optional<double>` | unset | Mode B target mean fanout (signal pins minus the driver, `#pins−1`); synthetic range `(1, 5)`. |
 | `distribution_tolerance_pct` | `double` | `2.0` | Post-gen deviation warning threshold. |
 
 `MasterSpec`: `name`, `num_inputs` (2), `num_outputs` (1), `weight` (1.0).
@@ -368,7 +371,7 @@ spec.tech_lef_path  = "data/nangate45/Nangate45_tech.lef";
 spec.cell_lef_paths = {"data/nangate45/Nangate45_stdcell.lef"};
 spec.num_insts = 500;
 spec.sequential_ratio = 0.15;     // DFFs detected via CK pin name
-spec.target_avg_fanout = 3.5;
+spec.target_avg_fanout = 3.5;     // avg fanout = signal pins minus the driver
 const int nets = eda::generateSynthetic(nb, spec);
 eda::Hypergraph hg;
 hg.buildFromBlock(nb.block());

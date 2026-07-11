@@ -182,9 +182,11 @@ struct SyntheticNetlistSpec
   // [2, 3, 4, 5, 6+], which must sum to 100.
   std::optional<std::array<double, kNumCombBuckets>>
       combinational_pin_distribution;
-  // Mode B (inverse): desired average signal-pin fanout. The generator
-  // back-solves a maximum-entropy bucket distribution to hit it. Must be
-  // strictly inside the anchor range (synthetic: (2, 6)).
+  // Mode B (inverse): desired average combinational fanout, i.e. load pins per
+  // net — a cell's signal pins EXCLUDING its single driver/output pin (#pins-1).
+  // The generator back-solves a maximum-entropy pin-count bucket distribution
+  // (anchors are pin counts = fanout+1) to hit it. Must be strictly inside the
+  // fanout range (synthetic: (1, 5); LEF: the measured anchor range minus one).
   std::optional<double> target_avg_fanout;
 
   // After generation, empirical proportions are compared against the
@@ -235,7 +237,7 @@ bool isClockGateMaster(odb::dbMaster* master);
 // Config-only spec validation (everything that does not depend on a loaded
 // LEF library): mutual exclusivity of the two combinational modes, the
 // distribution summing to 100, sequential_ratio in [0, 1], and
-// target_avg_fanout strictly inside the synthetic anchor range. Logs the
+// target_avg_fanout strictly inside the synthetic fanout range (1, 5). Logs the
 // first problem via `logger` (if non-null) and returns false. Returns true
 // for legacy-mode specs (they are validated by generateSynthetic itself).
 bool validateSpecConfig(const SyntheticNetlistSpec& spec, utl::Logger* logger);

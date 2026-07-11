@@ -83,7 +83,11 @@ TEST(SpecValidationTest, ModeBValid)
 {
   SyntheticNetlistSpec spec;
   spec.num_insts = 10;
-  spec.target_avg_fanout = 3.5;
+  spec.target_avg_fanout = 3.5;  // fanout (pins-1); valid range is (1, 5)
+  EXPECT_TRUE(validateSpecConfig(spec, nullptr));
+  // A fanout of 2 (pin-count target 3) is well inside the range — it was
+  // previously rejected when the field was mis-treated as a pin count.
+  spec.target_avg_fanout = 2.0;
   EXPECT_TRUE(validateSpecConfig(spec, nullptr));
 }
 
@@ -114,11 +118,15 @@ TEST(SpecValidationTest, DistributionMustSumTo100)
 
 TEST(SpecValidationTest, TargetOutOfRangeFails)
 {
+  // target_avg_fanout is a fanout (pins-1); the synthetic valid range is the
+  // pin-count anchor range (2, 6) shifted down by one => (1, 5), strict.
   SyntheticNetlistSpec spec;
   spec.num_insts = 10;
-  spec.target_avg_fanout = 6.0;  // must be strictly inside (2, 6)
+  spec.target_avg_fanout = 5.0;  // upper boundary of (1, 5)
   EXPECT_FALSE(validateSpecConfig(spec, nullptr));
-  spec.target_avg_fanout = 1.5;
+  spec.target_avg_fanout = 1.0;  // lower boundary
+  EXPECT_FALSE(validateSpecConfig(spec, nullptr));
+  spec.target_avg_fanout = 0.5;  // below range
   EXPECT_FALSE(validateSpecConfig(spec, nullptr));
 }
 
@@ -410,13 +418,17 @@ TEST(StatisticalMixTest, ModeBSyntheticMeanMatchesTarget)
   spec.seed = 21;
   ASSERT_GT(generateSynthetic(nb, spec), 0);
 
+  // target_avg_fanout is a fanout (signal pins minus the one driver pin), so
+  // the mean fanout — not the mean pin count — should match the target. All
+  // instances here are single-output combinational (no sequential_ratio).
   long pins = 0;
   int n = 0;
   for (odb::dbInst* inst : nb.block()->getInsts()) {
     pins += signalPinCount(inst->getMaster());
     ++n;
   }
-  EXPECT_NEAR(static_cast<double>(pins) / n, 3.5, 0.15);
+  const double mean_fanout = static_cast<double>(pins) / n - 1.0;
+  EXPECT_NEAR(mean_fanout, 3.5, 0.15);
 }
 
 // A deliberately-tight tolerance still succeeds (the mismatch is a logged

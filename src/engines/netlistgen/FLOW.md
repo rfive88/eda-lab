@@ -159,7 +159,7 @@ graph TD
   anc --> rp["resolveProbabilities"]
   rp --> modeA{"Mode A?"}
   modeA -->|yes| dist["prob = distribution / 100"]
-  modeA -->|no| maxe["target in anchor range?<br/>prob = maxEntropyDistribution(anchors, target)<br/>(log derived shape)"]
+  modeA -->|no| maxe["target_pins = fanout+1 in anchor range?<br/>prob = maxEntropyDistribution(anchors, target_pins)<br/>(log derived shape)"]
   maxe -->|out of range| r2["return false -> -1"]
   dist --> chk
   maxe --> chk{"LEF mode?"}

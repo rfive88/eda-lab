@@ -94,10 +94,12 @@ Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
 - **Sequential cells** get one fixed representative profile this stage
   (synthetic: `D, CK, Q` = 3 signal pins). No pin-count distribution for the
   sequential side yet.
-- **LEF-mode classification is auto-detected.** A master is *sequential* if
-  any `dbMTerm` carries `dbSigType::CLOCK`; everything else is combinational
-  and bucketed by signal-pin count. At spec-build time a lookup is built —
-  per bucket, the matching masters; separately, the sequential class.
+- **LEF-mode classification is auto-detected.** A master is *sequential* if it
+  has a clock pin — either a `dbMTerm` carrying `dbSigType::CLOCK`, **or** an
+  input pin with a conventional clock name (`CK`, `CLK`, `CLOCK`, `CP`,
+  case-insensitive; `isClockPinName`). Everything else is combinational and
+  bucketed by signal-pin count. At spec-build time a lookup is built — per
+  bucket, the matching masters; separately, the sequential class.
   - A combinational master must resolve to **exactly one output** and
     `(pin_count − 1)` inputs; **multi-output combinational masters are
     excluded** from bucket population (logged). This is a load-bearing
@@ -106,10 +108,12 @@ Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
     or `sequential_ratio > 0` with an empty sequential class — is a
     **hard failure at spec-build time**, naming the empty bucket/class. No
     silent skip or weight redistribution.
-  - **Nangate45 caveat:** its DFF clock pins are tagged `USE SIGNAL`, not
-    `CLOCK`, so the CLOCK auto-detection finds **no** sequential cells and
-    the DFFs (with `Q`+`QN`) are excluded as multi-output combinational. LEF
-    tests therefore use `sequential_ratio = 0.0`.
+  - **Nangate45 note:** its DFF clock pins are tagged `USE SIGNAL`, not
+    `CLOCK`. Relying on the `CLOCK` sig type alone would find **no** sequential
+    cells and wrongly exclude the DFFs (with `Q`+`QN`) as multi-output
+    combinational, so the clock-pin-name fallback above is what makes flip-flops
+    (`CK` pin) classify as sequential. Genuine multi-output combinational cells
+    (`FA_X1`, `HA_X1`) are still correctly excluded.
 - **`distribution_tolerance_pct`** (default 2.0): after generation, empirical
   proportions (and, in Mode B, the mean combinational signal-pin count) are
   compared to the targets. A deviation past tolerance is a **logged warning
@@ -341,7 +345,7 @@ eda::SyntheticNetlistSpec spec;
 spec.tech_lef_path  = "data/nangate45/Nangate45_tech.lef";
 spec.cell_lef_paths = {"data/nangate45/Nangate45_stdcell.lef"};
 spec.num_insts = 500;
-spec.sequential_ratio = 0.0;      // Nangate45 tags no CLOCK pins
+spec.sequential_ratio = 0.15;     // DFFs detected via CK pin name
 spec.target_avg_fanout = 3.5;
 const int nets = eda::generateSynthetic(nb, spec);
 eda::Hypergraph hg;

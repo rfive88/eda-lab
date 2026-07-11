@@ -3,9 +3,11 @@
 #include "engines/netlistgen/netlistgen.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <random>
+#include <string>
 
 #include "odb/db.h"
 #include "odb/geom.h"
@@ -70,6 +72,25 @@ int signalOutputCount(odb::dbMaster* master)
   return outs;
 }
 
+// A clock input pin marks a sequential cell. Many libraries (Nangate45 among
+// them) declare the clock pin with USE SIGNAL rather than USE CLOCK, so the
+// sig type alone misses every flip-flop. Recognise the conventional clock-pin
+// names as a fallback. Combinational cells in these libraries never use these
+// names (verified against Nangate45), so this does not misclassify them.
+bool isClockPinName(const std::string& name)
+{
+  static const char* const kClockPinNames[] = {"CK", "CLK", "CLOCK", "CP"};
+  std::string upper = name;
+  std::transform(upper.begin(), upper.end(), upper.begin(),
+                 [](unsigned char c) { return std::toupper(c); });
+  for (const char* candidate : kClockPinNames) {
+    if (upper == candidate) {
+      return true;
+    }
+  }
+  return false;
+}
+
 double meanOfTilt(const std::array<double, kNumCombBuckets>& anchors,
                   double theta)
 {
@@ -103,6 +124,14 @@ bool isSequentialMaster(odb::dbMaster* master)
 {
   for (odb::dbMTerm* mterm : master->getMTerms()) {
     if (mterm->getSigType() == odb::dbSigType::CLOCK) {
+      return true;
+    }
+    // Fallback for libraries that mark the clock pin USE SIGNAL (e.g. Nangate45,
+    // where a DFF's CK pin is USE SIGNAL and the cell has two outputs Q/QN — so
+    // without this it would be miscounted as a multi-output combinational cell
+    // and excluded, leaving no sequential masters to satisfy sequential_ratio).
+    if (mterm->getIoType() == odb::dbIoType::INPUT
+        && isClockPinName(mterm->getName())) {
       return true;
     }
   }

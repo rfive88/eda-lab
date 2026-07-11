@@ -47,7 +47,8 @@ std::string tmpPath(const std::string& name)
 }
 
 // A LEF-backed spec matching the CLI smoke-test config (all five combinational
-// buckets populated by Nangate45; no sequential cells — Nangate tags no CLOCK).
+// buckets populated by Nangate45; sequential_ratio 0 keeps this run purely
+// combinational — sequential detection is covered in the stage B tests).
 SyntheticNetlistSpec smokeSpec()
 {
   SyntheticNetlistSpec spec;

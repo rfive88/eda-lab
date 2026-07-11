@@ -153,12 +153,16 @@ TEST(SignalPinCountTest, ExcludesPowerGround)
 
   odb::dbMaster* nand2 = nullptr;
   odb::dbMaster* fa = nullptr;
+  odb::dbMaster* dff = nullptr;
   for (odb::dbMaster* m : nb.masters()) {
     if (m->getName() == "NAND2_X1") {
       nand2 = m;
     }
     if (m->getName() == "FA_X1") {
       fa = m;
+    }
+    if (m->getName() == "DFF_X1") {
+      dff = m;
     }
   }
   ASSERT_NE(nand2, nullptr);
@@ -169,6 +173,13 @@ TEST(SignalPinCountTest, ExcludesPowerGround)
   // FA_X1: A, B, CI in + CO, S out = 5 signal pins, 2 outputs.
   ASSERT_NE(fa, nullptr);
   EXPECT_EQ(signalPinCount(fa), 5);
+  EXPECT_FALSE(isSequentialMaster(fa));  // two outputs, but no clock => comb
+
+  // DFF_X1: clock pin CK is USE SIGNAL in Nangate45, so isSequentialMaster must
+  // recognise it by name (else its Q+QN read as a multi-output comb cell and it
+  // gets excluded, leaving no sequential masters — the reported bug).
+  ASSERT_NE(dff, nullptr);
+  EXPECT_TRUE(isSequentialMaster(dff));
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +192,7 @@ SyntheticNetlistSpec lefSpec()
   spec.tech_lef_path = techLef();
   spec.cell_lef_paths = {stdcellLef()};
   spec.num_insts = 500;
-  spec.sequential_ratio = 0.0;  // Nangate45 tags no CLOCK pins (see README)
+  spec.sequential_ratio = 0.0;  // pure combinational; sequential path tested below
   spec.combinational_pin_distribution = std::array<double, 5>{20, 20, 20, 20, 20};
   spec.min_fanout = 2;
   spec.max_fanout = 5;
@@ -210,8 +221,10 @@ TEST(LefGenerationTest, GeneratesValidNetlist)
   }
 }
 
-// Multi-output combinational masters (FA_X1, the DFF variants whose CK is not
-// CLOCK-tagged so they read as combinational with Q+QN) never get chosen.
+// With sequential_ratio 0, only single-output combinational masters are chosen.
+// Genuine multi-output combinational cells (FA_X1, HA_X1) are excluded; the DFF
+// variants are now recognised as sequential (not multi-output comb) and so are
+// simply not drawn from the combinational pool here.
 TEST(LefGenerationTest, ExcludesMultiOutputMasters)
 {
   NetlistBuilder nb("lefexcl");
@@ -230,7 +243,29 @@ TEST(LefGenerationTest, ExcludesMultiOutputMasters)
     }
     EXPECT_EQ(outs, 1) << inst->getMaster()->getName();
     EXPECT_NE(inst->getMaster()->getName(), "FA_X1");
+    EXPECT_FALSE(isSequentialMaster(inst->getMaster()))
+        << inst->getMaster()->getName();
   }
+}
+
+// The reported bug's regression: a Nangate45-backed run with sequential_ratio > 0
+// must succeed and actually place sequential (flip-flop) instances, because the
+// clock pin CK — declared USE SIGNAL — is recognised by name.
+TEST(LefGenerationTest, PlacesSequentialInstancesFromNangate)
+{
+  NetlistBuilder nb("lefseq");
+  SyntheticNetlistSpec spec = lefSpec();
+  spec.sequential_ratio = 0.2;
+  const int nets = generateSynthetic(nb, spec);
+  ASSERT_GT(nets, 0);
+
+  int seq_insts = 0;
+  for (odb::dbInst* inst : nb.block()->getInsts()) {
+    if (isSequentialMaster(inst->getMaster())) {
+      ++seq_insts;
+    }
+  }
+  EXPECT_GT(seq_insts, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -264,15 +299,16 @@ TEST(LefBucketTest, PopulatedBucketsSucceed)
 
 TEST(LefBucketTest, EmptySequentialClassFailsFast)
 {
-  // Nangate45 tags no CLOCK pins, so the sequential class is empty; asking
-  // for sequential cells must fail fast.
+  // twobucket.lef has only combinational cells (no CLOCK sig type, no
+  // clock-named pins), so its sequential class is empty; asking for sequential
+  // cells must fail fast.
   NetlistBuilder nb("emptyseq");
   SyntheticNetlistSpec spec;
   spec.tech_lef_path = techLef();
-  spec.cell_lef_paths = {stdcellLef()};
+  spec.cell_lef_paths = {twoBucketLef()};
   spec.num_insts = 50;
   spec.sequential_ratio = 0.3;
-  spec.combinational_pin_distribution = std::array<double, 5>{20, 20, 20, 20, 20};
+  spec.combinational_pin_distribution = std::array<double, 5>{50, 0, 50, 0, 0};
   EXPECT_EQ(generateSynthetic(nb, spec), -1);
 }
 

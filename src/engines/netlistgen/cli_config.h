@@ -54,11 +54,13 @@ bool validateAndWrite(NetlistBuilder& builder,
 
 // Full CLI run: read the config file at `config_path`, parse it, generate,
 // auto-size the die area, validate, and write requested outputs. Phase markers
-// and the final instance/net/pin summary are emitted through a utl::Logger
-// (stdout) as info; `verbosity` (the CLI's -verbosity flag) raises that
-// logger's debug level for the whole run (0 = default phase markers only; see
-// support/logging.h). Hard error diagnostics still go to `err`. Returns a
-// process exit code (0 = success). main() is a thin wrapper over this.
+// are emitted through a utl::Logger (stdout) as info, and the run ends with a
+// design-statistics summary (cell counts comb/seq, combinational pin-count
+// distribution, net count, net fanout distribution) via report(); `verbosity`
+// (the CLI's -verbosity flag) raises that logger's debug level for the whole
+// run (0 = default phase markers only; see support/logging.h). Hard error
+// diagnostics still go to `err`. Returns a process exit code (0 = success).
+// main() is a thin wrapper over this.
 int runCliFromFile(const std::string& config_path,
                    std::ostream& err,
                    int verbosity = 0);

@@ -92,8 +92,9 @@ Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
     user-supplied prior. The derived distribution is logged. The target must
     lie strictly inside the anchor range (synthetic: `(2, 6)`).
 - **Sequential cells** get one fixed representative profile this stage
-  (synthetic: `D, CK, Q` = 3 signal pins). No pin-count distribution for the
-  sequential side yet.
+  (synthetic: `D, CK, Q` = 3 signal pins, with `CK` a real `dbSigType::CLOCK`
+  pin so the cell reads as sequential via `isSequentialMaster`). No pin-count
+  distribution for the sequential side yet.
 - **LEF-mode classification is auto-detected.** A master is *sequential* if it
   has a clock pin — either a `dbMTerm` carrying `dbSigType::CLOCK`, **or** an
   input pin with a conventional clock name (`CK`, `CLK`, `CLOCK`, `CP`,
@@ -277,8 +278,14 @@ path) — never the repo root or source tree.
 
 All output is `utl::Logger` (repo convention — see `CLAUDE.md` /
 `src/support/logging.h`). The CLI narrates the run with default-visible `info`
-phase markers (parse config → generate → validate → write → done) and a final
-count summary; hard errors go to stderr. `-verbosity <level>` (group
+phase markers (parse config → generate → validate → write → done) and, at the
+end, a **design summary** (`report()`, no id/prefix): total cell count split
+into combinational vs sequential, the combinational cells' signal-pin-count
+distribution (the `2/3/4/5/6+` buckets), the net count, and the net fanout
+(pins-per-net) distribution with min/max/mean. Sequential cells are counted via
+`isSequentialMaster`, so the split is correct in both LEF mode (flip-flops by
+clock pin) and synthetic mode (the `SEQ` representative carries a real clock
+pin). Hard errors go to stderr. `-verbosity <level>` (group
 `"netlistgen"`) raises detail across the whole run: **1** adds the resolved
 plan (bucket probabilities, sequential masters) and achieved-vs-requested
 statistics unconditionally (not just on a tolerance miss); **2** adds

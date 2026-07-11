@@ -78,10 +78,15 @@ class NetlistBuilder
   // Create a connectivity-only synthetic master with input pins
   // i0..i{num_inputs-1} and output pins o0..o{num_outputs-1}. The master is
   // frozen on return and ready to instantiate. Returns nullptr if the name
-  // already exists. Triggers lazy synthetic-tech creation on first use.
+  // already exists. Triggers lazy synthetic-tech creation on first use. When
+  // `clocked` is true, input pin i0 is given dbSigType::CLOCK (its clock pin),
+  // so the master reads as sequential via isSequentialMaster — used for the
+  // synthetic sequential representative. Topology is unaffected: a CLOCK input
+  // is still a sink in net formation, exactly as a SIGNAL input was.
   odb::dbMaster* makeMaster(const std::string& name,
                             int num_inputs,
-                            int num_outputs);
+                            int num_outputs,
+                            bool clocked = false);
 
   // Returns nullptr if the name already exists in the block.
   odb::dbInst* makeInst(odb::dbMaster* master, const std::string& name);

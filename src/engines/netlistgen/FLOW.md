@@ -305,8 +305,10 @@ JSON is confined to the CLI layer — it never reaches `NetlistBuilder` /
 stay with `validateSpecConfig` at generation time. `runCliFromFile` is the one
 pipeline: create a shared `utl::Logger` (verbosity from the `-verbosity` flag
 via `applyVerbosity`) → parse → `generateSynthetic` (builder shares the logger)
-→ `estimateDieArea` → `validateAndWrite` → log counts. Each step is an `info`
-phase marker; `-verbosity` surfaces the library's `debugPrint` detail through
+→ `estimateDieArea` → `validateAndWrite` → `reportDesignSummary` (final
+default-visible statistics block: cell counts comb/seq, combinational
+pin-count histogram, net count, fanout histogram) → log done. Each step is an
+`info` phase marker; `-verbosity` surfaces the library's `debugPrint` detail through
 the same logger. `validateAndWrite` gates output on `validateNetlist` (a
 malformed block writes **nothing**, fail-fast) and then creates each requested
 output path's parent directory (with `create_directories`) if it is missing,
@@ -343,7 +345,8 @@ graph TD
   odir -->|create failed| e1c["err 'cannot create output directory'<br/>write nothing; return 1"]
   odir -->|ok| wdef["if output_def_path: writeDef (info: Wrote DEF)"]
   wdef --> wodb["if output_odb_path: writeOdb (info: Wrote .odb)"]
-  wodb --> counts["info: Done."]
+  wodb --> summ["reportDesignSummary (report):<br/>cells comb/seq · comb pin-count hist<br/>net count · fanout hist (min/max/mean)"]
+  summ --> counts["info: Done."]
   counts --> ok0["return 0"]
 
   run -.->|any escaping std::exception| bck["main() catch-all:<br/>'Fatal error'; return 1"]

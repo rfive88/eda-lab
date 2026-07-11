@@ -2,9 +2,12 @@
 
 #include "engines/netlistgen/cli_config.h"
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <map>
 #include <sstream>
 
 #include <nlohmann/json.hpp>
@@ -186,6 +189,82 @@ bool ensureOutputDir(const std::string& path,
   return true;
 }
 
+// Cap on distinct net-fanout rows printed in the summary, so a design with a
+// very wide fanout range cannot emit an unbounded table (min/max/mean still
+// convey the spread in that case).
+constexpr std::size_t kMaxFanoutRows = 20;
+
+// Print a statistics summary of the generated design as the run's final,
+// default-visible output: cell counts (combinational vs sequential), the
+// combinational cells' signal-pin-count distribution, the net count, and the
+// net fanout (pins-per-net) distribution. Emitted via report() (level OFF, no
+// id/prefix) so it reads as a clean block; nothing here is gated on verbosity.
+void reportDesignSummary(odb::dbBlock* block, utl::Logger& logger)
+{
+  // Cells: split combinational vs sequential, and histogram the combinational
+  // cells by signal-pin count into the same 2/3/4/5/6+ buckets the generator
+  // uses (index 0..4). Latches/clock gates are never placed, so every instance
+  // is one or the other.
+  int seq = 0;
+  int comb = 0;
+  std::array<int, 5> comb_pin_hist{};
+  for (odb::dbInst* inst : block->getInsts()) {
+    odb::dbMaster* master = inst->getMaster();
+    if (isSequentialMaster(master)) {
+      ++seq;
+    } else {
+      ++comb;
+      const int pins = signalPinCount(master);
+      const int idx = pins >= 6 ? 4 : std::max(0, pins - 2);
+      ++comb_pin_hist[idx];
+    }
+  }
+  const int total = seq + comb;
+
+  // Nets: fanout is the pin count on the net (driver + sinks), matching the
+  // generator's fanout definition.
+  const int num_nets = static_cast<int>(block->getNets().size());
+  std::map<int, int> fanout_hist;
+  long fanout_sum = 0;
+  int fanout_min = std::numeric_limits<int>::max();
+  int fanout_max = 0;
+  for (odb::dbNet* net : block->getNets()) {
+    const int fanout = static_cast<int>(net->getITerms().size());
+    ++fanout_hist[fanout];
+    fanout_sum += fanout;
+    fanout_min = std::min(fanout_min, fanout);
+    fanout_max = std::max(fanout_max, fanout);
+  }
+
+  logger.report("");
+  logger.report("===== Design summary =====");
+  logger.report("Cells: {} total  (combinational {}, sequential {})", total,
+                comb, seq);
+  logger.report("Combinational cells by signal-pin count:");
+  static const char* const kPinLabels[5] = {"2", "3", "4", "5", "6+"};
+  for (int i = 0; i < 5; ++i) {
+    const double pct = comb > 0 ? 100.0 * comb_pin_hist[i] / comb : 0.0;
+    logger.report("    {:>3} pins: {:6d}  ({:5.1f}%)", kPinLabels[i],
+                  comb_pin_hist[i], pct);
+  }
+  logger.report("Nets: {}", num_nets);
+  if (num_nets > 0) {
+    const double mean = static_cast<double>(fanout_sum) / num_nets;
+    logger.report("Net fanout (pins per net): min {}, max {}, mean {:.2f}",
+                  fanout_min, fanout_max, mean);
+    if (fanout_hist.size() <= kMaxFanoutRows) {
+      for (const auto& [fanout, count] : fanout_hist) {
+        const double pct = 100.0 * count / num_nets;
+        logger.report("    fanout {:>3}: {:6d}  ({:5.1f}%)", fanout, count, pct);
+      }
+    } else {
+      logger.report("    ({} distinct fanout values; see min/max/mean above)",
+                    fanout_hist.size());
+    }
+  }
+  logger.report("==========================");
+}
+
 }  // namespace
 
 bool validateAndWrite(NetlistBuilder& builder,
@@ -287,6 +366,7 @@ int runCliFromFile(const std::string& config_path,
     logger.info(utl::UKN, kMsgWroteOdb, "Wrote .odb: {}",
                 *config.output_odb_path);
   }
+  reportDesignSummary(block, logger);
   logger.info(utl::UKN, kMsgDone, "Done.");
   return 0;
 }

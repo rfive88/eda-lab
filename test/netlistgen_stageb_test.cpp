@@ -376,10 +376,16 @@ TEST(StatisticalMixTest, SyntheticProportionsWithinTolerance)
   int seq = 0;
   std::array<int, 5> bucket{};
   for (odb::dbInst* inst : nb.block()->getInsts()) {
-    const int pins = signalPinCount(inst->getMaster());
+    odb::dbMaster* master = inst->getMaster();
+    const int pins = signalPinCount(master);
     // Synthetic sequential representative is SEQ (2 in + 1 out = 3 pins);
-    // combinational reps are COMB_k. Classify by master name prefix.
-    if (inst->getMaster()->getName() == "SEQ") {
+    // combinational reps are COMB_k. Classify by master name prefix. The SEQ
+    // master carries a real CLOCK pin, so isSequentialMaster must agree with
+    // the name — this is what lets the CLI summary count sequential cells in
+    // synthetic mode, not just LEF mode.
+    const bool is_seq = master->getName() == "SEQ";
+    EXPECT_EQ(isSequentialMaster(master), is_seq) << master->getName();
+    if (is_seq) {
       ++seq;
     } else {
       const int b = (pins >= 6) ? 4 : pins - 2;

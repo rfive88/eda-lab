@@ -422,7 +422,8 @@ std::vector<odb::dbMaster*> NetlistBuilder::masters() const
 
 odb::dbMaster* NetlistBuilder::makeMaster(const std::string& name,
                                           const int num_inputs,
-                                          const int num_outputs)
+                                          const int num_outputs,
+                                          const bool clocked)
 {
   ensureSyntheticTech();
   odb::dbLib* lib = *db_->getLibs().begin();
@@ -432,10 +433,14 @@ odb::dbMaster* NetlistBuilder::makeMaster(const std::string& name,
   }
   master->setType(odb::dbMasterType::CORE);
   for (int i = 0; i < num_inputs; ++i) {
+    // A clocked master's first input is its clock pin (CLOCK sig type), so it
+    // is recognised as sequential; the rest stay SIGNAL data inputs.
+    const odb::dbSigType sig = (clocked && i == 0) ? odb::dbSigType::CLOCK
+                                                   : odb::dbSigType::SIGNAL;
     odb::dbMTerm::create(master,
                          ("i" + std::to_string(i)).c_str(),
                          odb::dbIoType::INPUT,
-                         odb::dbSigType::SIGNAL);
+                         sig);
   }
   for (int o = 0; o < num_outputs; ++o) {
     odb::dbMTerm::create(master,
@@ -675,7 +680,7 @@ bool buildPlan(NetlistBuilder& builder, const SyntheticNetlistSpec& spec,
       }
     }
     if (plan.seq_ratio > 0.0) {
-      plan.seq.push_back(builder.makeMaster("SEQ", 2, 1));
+      plan.seq.push_back(builder.makeMaster("SEQ", 2, 1, /*clocked=*/true));
     }
   }
   return true;

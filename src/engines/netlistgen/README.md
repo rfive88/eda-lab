@@ -281,8 +281,8 @@ All output is `utl::Logger` (repo convention — see `CLAUDE.md` /
 phase markers (parse config → generate → validate → write → done) and, at the
 end, a **design summary** (`report()`, no id/prefix): total cell count split
 into combinational vs sequential, the combinational cells' signal-pin-count
-distribution (the `2/3/4/5/6+` buckets), the net count, and the net fanout
-(pins-per-net) distribution with min/max/mean. Sequential cells are counted via
+distribution (the `2/3/4/5/6+` buckets), the net count, the average fanout per
+net, and the net fanout (pins-per-net) distribution. Sequential cells are counted via
 `isSequentialMaster`, so the split is correct in both LEF mode (flip-flops by
 clock pin) and synthetic mode (the `SEQ` representative carries a real clock
 pin). Hard errors go to stderr. `-verbosity <level>` (group

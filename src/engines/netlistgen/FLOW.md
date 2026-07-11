@@ -307,7 +307,8 @@ pipeline: create a shared `utl::Logger` (verbosity from the `-verbosity` flag
 via `applyVerbosity`) → parse → `generateSynthetic` (builder shares the logger)
 → `estimateDieArea` → `validateAndWrite` → `reportDesignSummary` (final
 default-visible statistics block: cell counts comb/seq, combinational
-pin-count histogram, net count, fanout histogram) → log done. Each step is an
+pin-count histogram, net count, average fanout per net, fanout histogram) →
+log done. Each step is an
 `info` phase marker; `-verbosity` surfaces the library's `debugPrint` detail through
 the same logger. `validateAndWrite` gates output on `validateNetlist` (a
 malformed block writes **nothing**, fail-fast) and then creates each requested
@@ -345,7 +346,7 @@ graph TD
   odir -->|create failed| e1c["err 'cannot create output directory'<br/>write nothing; return 1"]
   odir -->|ok| wdef["if output_def_path: writeDef (info: Wrote DEF)"]
   wdef --> wodb["if output_odb_path: writeOdb (info: Wrote .odb)"]
-  wodb --> summ["reportDesignSummary (report):<br/>cells comb/seq · comb pin-count hist<br/>net count · fanout hist (min/max/mean)"]
+  wodb --> summ["reportDesignSummary (report):<br/>cells comb/seq · comb pin-count hist<br/>net count · avg fanout/net · fanout hist"]
   summ --> counts["info: Done."]
   counts --> ok0["return 0"]
 

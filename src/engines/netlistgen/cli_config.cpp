@@ -6,7 +6,6 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
-#include <limits>
 #include <map>
 #include <sstream>
 
@@ -226,14 +225,10 @@ void reportDesignSummary(odb::dbBlock* block, utl::Logger& logger)
   const int num_nets = static_cast<int>(block->getNets().size());
   std::map<int, int> fanout_hist;
   long fanout_sum = 0;
-  int fanout_min = std::numeric_limits<int>::max();
-  int fanout_max = 0;
   for (odb::dbNet* net : block->getNets()) {
     const int fanout = static_cast<int>(net->getITerms().size());
     ++fanout_hist[fanout];
     fanout_sum += fanout;
-    fanout_min = std::min(fanout_min, fanout);
-    fanout_max = std::max(fanout_max, fanout);
   }
 
   logger.report("");
@@ -249,16 +244,16 @@ void reportDesignSummary(odb::dbBlock* block, utl::Logger& logger)
   }
   logger.report("Nets: {}", num_nets);
   if (num_nets > 0) {
-    const double mean = static_cast<double>(fanout_sum) / num_nets;
-    logger.report("Net fanout (pins per net): min {}, max {}, mean {:.2f}",
-                  fanout_min, fanout_max, mean);
+    const double avg = static_cast<double>(fanout_sum) / num_nets;
+    logger.report("Average fanout per net: {:.2f} pins", avg);
+    logger.report("Net fanout distribution (pins per net):");
     if (fanout_hist.size() <= kMaxFanoutRows) {
       for (const auto& [fanout, count] : fanout_hist) {
         const double pct = 100.0 * count / num_nets;
         logger.report("    fanout {:>3}: {:6d}  ({:5.1f}%)", fanout, count, pct);
       }
     } else {
-      logger.report("    ({} distinct fanout values; see min/max/mean above)",
+      logger.report("    ({} distinct fanout values; average above)",
                     fanout_hist.size());
     }
   }

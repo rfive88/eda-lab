@@ -2,14 +2,23 @@
 // governed by Rent's rule (see docs/briefs/spike-netlistgen-E1-io-rent.md).
 // Needs no data files (synthetic mode only).
 //
-// Two deliberate deviations from a literal reading of the brief, both
-// documented in README.md's "Primary I/O generation (Stage E1)" section and
-// exercised directly here:
-//   - A PI-selected net's existing internal driver is DISCONNECTED and
-//     replaced by the PI (never added "alongside" it) — real designs have a
-//     net driven either by a primary input or by an instance output, never
-//     both, and this repo treats "exactly one driver per net" as a hard,
-//     tested invariant (validateNetlist, now bTerm-aware).
+// Deliberate deviations from a literal reading of the brief, all documented
+// in README.md's "Primary I/O generation (Stage E1)" section and exercised
+// directly here:
+//   - PI/PO never touch a live driver at all (this codebase treats both
+//     "exactly one driver per net" AND "no dangling instances" as hard,
+//     strict invariants — confirmed explicitly before implementing, after
+//     an earlier revision of this feature that disconnected an existing
+//     net's driver for PI was found to leave that driver's instance
+//     dangling in some cases). PI targets Stage D's own leftover,
+//     never-connected internal input pins first, falling back to stealing
+//     a non-last sink of an already-multi-sink net (never dangling that
+//     net's driver, since >=1 sink always remains) only if that pool runs
+//     dry. PO prefers claiming a leftover, never-connected internal output
+//     pin (repairing what would otherwise be a dead-output instance),
+//     falling back to adding one more sink onto any existing net (always
+//     safe) once exhausted. `NoDanglingInstancesAfterE1` below is the
+//     direct correctness test for this.
 //   - netlistgen never touches the Hypergraph engine (see its "Input /
 //     output contract"); it returns raw dbNet*/dbInst* lists via RentStats,
 //     and it is the CALLER's job to translate them into hgm.is_pi/is_po
@@ -22,6 +31,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <string>
 #include <unordered_set>
@@ -90,6 +100,48 @@ SyntheticNetlistSpec baseSpec()
   return spec;
 }
 
+// Per-instance connectivity tally used by the strict "no dangling
+// instances" checks below. `fully_isolated`: instances with zero connected
+// pins at all. `dead_output`: instances with >=1 output pin, none
+// connected — "useless" in the sense the design decision behind Stage E1's
+// PI/PO wiring is built around (an instance that drives nothing).
+struct ConnectivityTally
+{
+  int fully_isolated = 0;
+  int dead_output = 0;
+};
+
+ConnectivityTally tallyConnectivity(odb::dbBlock* block)
+{
+  ConnectivityTally t;
+  for (odb::dbInst* inst : block->getInsts()) {
+    int connected = 0;
+    int outputs = 0;
+    int connected_outputs = 0;
+    for (odb::dbITerm* it : inst->getITerms()) {
+      const odb::dbSigType st = it->getSigType();
+      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
+        continue;
+      }
+      if (it->getNet() != nullptr) {
+        ++connected;
+      }
+      if (it->getIoType() == odb::dbIoType::OUTPUT) {
+        ++outputs;
+        if (it->getNet() != nullptr) {
+          ++connected_outputs;
+        }
+      }
+    }
+    if (connected == 0) {
+      ++t.fully_isolated;
+    } else if (outputs > 0 && connected_outputs == 0) {
+      ++t.dead_output;
+    }
+  }
+  return t;
+}
+
 // ---------------------------------------------------------------------------
 // 1. No E1 params: unaffected.
 // ---------------------------------------------------------------------------
@@ -146,6 +198,13 @@ TEST(RentTest, BasicE1)
 
   EXPECT_TRUE(std::isfinite(stats.p_actual));
   EXPECT_GT(stats.p_actual, 0.0);
+
+  // Strict rules: no multiply-driven nets (validateNetlist, now bTerm-aware)
+  // and no dangling instances (see NoDanglingInstancesAfterE1 for the
+  // detailed, pre/post-E1 comparison version of this check).
+  const NetlistValidation v = validateNetlist(nb.block());
+  EXPECT_TRUE(v.ok) << v.message;
+  EXPECT_EQ(tallyConnectivity(nb.block()).fully_isolated, 0);
 
   Hypergraph hg;
   hg.buildFromBlock(nb.block());
@@ -256,6 +315,53 @@ TEST(RentTest, AllCombinationalPinTypeCreatesNoBoundaryCells)
 }
 
 // ---------------------------------------------------------------------------
+// Strict rule: Stage E1's PI/PO wiring must never create a dangling
+// instance (one whose output drives nothing), and must never increase the
+// count of Stage D's own pre-existing dead-output instances — it may only
+// ever *repair* some of them (PO claiming a leftover output pin). Checked
+// across several instance counts, seeds, and pin-type distributions.
+// ---------------------------------------------------------------------------
+
+TEST(RentTest, NoDanglingInstancesAfterE1)
+{
+  for (const int num_insts : {50, 500, 3000}) {
+    for (const uint32_t seed : {1u, 7u, 42u}) {
+      SyntheticNetlistSpec base = baseSpec();
+      base.num_insts = num_insts;
+      base.seed = seed;
+
+      NetlistBuilder before("before");
+      ASSERT_GT(generateSynthetic(before, base), 0)
+          << "insts " << num_insts << " seed " << seed;
+      const ConnectivityTally pre = tallyConnectivity(before.block());
+      ASSERT_EQ(pre.fully_isolated, 0)
+          << "Stage D itself produced an isolated instance — unexpected";
+
+      NetlistBuilder after("after");
+      SyntheticNetlistSpec spec = base;
+      spec.rent_k = 2.5;
+      spec.rent_p = 0.60;
+      RentStats stats;
+      ASSERT_GT(generateSynthetic(after, spec, nullptr, &stats), 0)
+          << "insts " << num_insts << " seed " << seed;
+      ASSERT_TRUE(stats.engaged);
+
+      const ConnectivityTally post = tallyConnectivity(after.block());
+      EXPECT_EQ(post.fully_isolated, 0)
+          << "insts " << num_insts << " seed " << seed
+          << ": E1 introduced a dangling instance";
+      EXPECT_LE(post.dead_output, pre.dead_output)
+          << "insts " << num_insts << " seed " << seed
+          << ": E1 increased the dead-output-instance count instead of "
+             "only ever repairing it";
+
+      EXPECT_TRUE(validateNetlist(after.block()).ok)
+          << "insts " << num_insts << " seed " << seed;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 5. With sub-clusters.
 // ---------------------------------------------------------------------------
 
@@ -272,6 +378,8 @@ TEST(RentTest, WithSubClusters)
   RentStats stats;
   ASSERT_GT(generateSynthetic(nb, spec, nullptr, &stats), 0);
   ASSERT_TRUE(stats.engaged);
+  EXPECT_TRUE(validateNetlist(nb.block()).ok);
+  EXPECT_EQ(tallyConnectivity(nb.block()).fully_isolated, 0);
   ASSERT_TRUE(stats.has_clusters);
   ASSERT_EQ(stats.cluster_rent.size(), 2u);
   EXPECT_EQ(stats.cluster_rent[0].cluster_idx, 0);
@@ -388,6 +496,8 @@ TEST(RentTest, SmallDesignCapsWithoutCrashing)
   ASSERT_TRUE(stats.engaged);
   EXPECT_TRUE(stats.capped);
   EXPECT_EQ(stats.T_in + stats.T_out, stats.T_actual);
+  EXPECT_TRUE(validateNetlist(nb.block()).ok);
+  EXPECT_EQ(tallyConnectivity(nb.block()).fully_isolated, 0);
 }
 
 }  // namespace

@@ -42,16 +42,20 @@
 // Stage E1 (optional): primary input/output port generation sized by
 // Rent's rule (T = k * G^p), engaged when both rent_k and rent_p are set.
 // Runs as a separate pass over the already-formed dbBlock, once net
-// formation completes — never a change to formation itself. A PI REPLACES
-// its randomly-selected net's existing driver (never adds a second one:
-// real designs have a net driven either by a primary input or an instance
-// output, never both, and this repo enforces "exactly one driver per net"
-// as a hard invariant); a PO is just one more sink/observer. Requires the
-// statistical mix (reuses its representative masters for boundary
-// buffer/FF cells). netlistgen still never touches the Hypergraph engine —
-// see RentStats below and README.md's "Primary I/O generation (Stage E1)"
-// for the full rationale (including why is_pi/is_po end up as hyperedge,
-// not vertex, planes). See README.md / FLOW.md.
+// formation completes — never a change to formation itself. NEITHER PI NOR
+// PO EVER TOUCHES A LIVE DRIVER: this repo enforces "exactly one driver per
+// net" (validateNetlist) AND "no dangling instances" (an instance whose
+// output drives nothing) as equally hard invariants, so a PI targets Stage
+// D's own leftover, never-connected internal input pins first (falling
+// back to stealing a non-last sink of a multi-sink net only if that pool is
+// empty), and a PO prefers claiming a leftover, never-connected output pin
+// (repairing a dead-output instance) before falling back to adding one more
+// sink onto any existing net. Requires the statistical mix (reuses its
+// representative masters for boundary buffer/FF cells). netlistgen still
+// never touches the Hypergraph engine — see RentStats below and README.md's
+// "Primary I/O generation (Stage E1)" for the full rationale (including why
+// is_pi/is_po end up as hyperedge, not vertex, planes). See README.md /
+// FLOW.md.
 
 #pragma once
 
@@ -341,8 +345,13 @@ struct RentStats
                                // if the input was in (1.0, 1.2]
   int G = 0;                   // internal instance count (spec.num_insts)
   int T_target = 0;            // round(rent_k * G^rent_p_target)
-  bool capped = false;         // true if T_target exceeded the net count
-                               // and was capped down to it (Step 2)
+  bool capped = false;         // true if PI/PO target-pin supply fell short
+                               // of Rent's rule's request (T_in was capped
+                               // to the available pool up front, and/or an
+                               // individual PI/PO port had to be skipped
+                               // for lack of remaining material) — see
+                               // README.md's "Primary I/O generation
+                               // (Stage E1)" section
 
   // ---- Actual (Steps 2, 3, 6) ----
   int T_in = 0;      // PI count actually created

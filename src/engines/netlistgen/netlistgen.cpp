@@ -50,6 +50,7 @@ constexpr int kMsgPeakConfig = 313;
 constexpr int kMsgRentConfig = 314;
 constexpr int kMsgRentCap = 315;
 constexpr int kMsgRentDegenerate = 316;
+constexpr int kMsgRentSkipped = 317;
 
 // Implementation constant: fraction of a cluster net's sink slots preferring
 // an intra-cluster receiver over background. Not exposed in the JSON config
@@ -1310,16 +1311,35 @@ odb::dbITerm* firstDataInputIterm(odb::dbInst* inst)
 // already enforced they're both-or-neither).
 //
 // PI/PO realization (see README.md's "Primary I/O generation (Stage E1)"
-// section for the full rationale): every net Stage D forms already has
-// exactly one committed internal driver, so a PI cannot be "added" as a
-// second driver without producing a two-driver net — this codebase treats
-// "exactly one driver per net" as a hard invariant (validateNetlist), and
-// preserving that real-world net<->driver correspondence was an explicit
-// design decision for this feature. A PI-selected net's existing driver
-// ITerm is therefore DISCONNECTED (freed, left unused) and the PI's
-// dbBTerm(INPUT) becomes the net's sole driver. A PO has no such conflict —
-// its dbBTerm(OUTPUT) is simply one more sink/observer alongside the net's
-// unchanged existing driver and sinks.
+// section for the full rationale — this is the SECOND revision of this
+// design, not the brief's literal Step 2/3): every net Stage D forms
+// already has exactly one committed internal driver AND every instance's
+// output must always drive something (an instance with no live output is
+// dead logic and, transitively, can orphan whatever fed it — this codebase
+// treats both "exactly one driver per net" and "no dangling instances" as
+// hard, non-negotiable invariants, confirmed explicitly before
+// implementing). So neither "PI as an additional driver" (two drivers) nor
+// "PI replaces an existing driver" (leaves that driver's instance dangling)
+// is acceptable. Instead:
+//
+//   - PI never touches a live driver at all. It targets Stage D's own
+//     leftover, never-connected internal INPUT/INOUT pins (the documented
+//     "thin tail" — plentiful in practice) first, falling back to
+//     "stealing" a non-last sink of an already-multi-sink net (which never
+//     dangles that net's driver, since >=1 sink always remains) only if the
+//     leftover pool runs dry. A PI's target net is therefore always FRESH,
+//     built from pool material.
+//   - PO never touches a live driver either. It prefers claiming a
+//     leftover, never-connected internal OUTPUT pin — which actively
+//     REPAIRS what would otherwise be a dead-output instance by giving it a
+//     real destination — falling back to simply adding one more sink onto
+//     any existing, already-driven net (always safe; nets already support
+//     arbitrary fanout) once that pool is exhausted.
+//
+// Both pools can run out in principle (a port with zero pool material is
+// SKIPPED — logged, not a failure — mirroring Stage D's own thin-tail-skip
+// philosophy exactly), so `RentStats.T_in`/`T_out`/`T_actual` reflect what
+// was actually achieved, which may be less than Rent's rule requested.
 //
 // Boundary buffer/FF cells reuse the statistical mix's already-resolved
 // representative masters (the first non-empty combinational bucket for a
@@ -1353,33 +1373,79 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
   stats.T_target = T_target;
   const double io_input_ratio = spec.io_input_ratio.value_or(0.60);
 
-  // ---- Step 2: identify boundary candidates via random sampling ----
-  std::vector<odb::dbNet*> net_list;
-  for (odb::dbNet* net : builder.block()->getNets()) {
-    net_list.push_back(net);
+  // ---- Step 2 (revised): safe target-pin pools, never a live driver ----
+  // PI pool: every currently-unconnected INPUT/INOUT iterm (Stage D's own
+  // "thin tail" leftover sink material), plus, as a deeper fallback,
+  // all-but-one sink of every net with fanout >= 2 (STEALABLE — the
+  // reserved first sink guarantees that net's driver never loses its last
+  // sink; a stolen iterm is disconnected from its current net only at the
+  // moment it's actually drawn). A PI's target net is therefore always
+  // freshly built from pool material — an existing net's driver is never
+  // touched.
+  std::vector<odb::dbITerm*> pi_pool;
+  for (odb::dbInst* inst : builder.block()->getInsts()) {
+    for (odb::dbITerm* it : inst->getITerms()) {
+      const odb::dbSigType st = it->getSigType();
+      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
+        continue;
+      }
+      const auto io = it->getIoType().getValue();
+      if ((io == odb::dbIoType::INPUT || io == odb::dbIoType::INOUT)
+          && it->getNet() == nullptr) {
+        pi_pool.push_back(it);
+      }
+    }
   }
-  std::shuffle(net_list.begin(), net_list.end(), rng);
+  for (odb::dbNet* net : builder.block()->getNets()) {
+    std::vector<odb::dbITerm*> sinks;
+    for (odb::dbITerm* it : net->getITerms()) {
+      if (it->getIoType() != odb::dbIoType::OUTPUT) {
+        sinks.push_back(it);
+      }
+    }
+    for (size_t i = 1; i < sinks.size(); ++i) {  // sinks[0] reserved
+      pi_pool.push_back(sinks[i]);
+    }
+  }
+  std::shuffle(pi_pool.begin(), pi_pool.end(), rng);
+
+  // PO pool: every currently-unconnected OUTPUT iterm — Stage D's own
+  // "skipped driver" leftovers. Claiming one REPAIRS what would otherwise be
+  // a dead-output instance by giving it a real destination. If exhausted, PO
+  // falls back to adding one more sink onto any existing, already-driven net
+  // — always safe (a net's driver is never touched; nets already support
+  // arbitrary fanout), so PO never risks a dangling instance either way.
+  std::vector<odb::dbITerm*> po_pool;
+  for (odb::dbInst* inst : builder.block()->getInsts()) {
+    for (odb::dbITerm* it : inst->getITerms()) {
+      const odb::dbSigType st = it->getSigType();
+      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
+        continue;
+      }
+      if (it->getIoType() == odb::dbIoType::OUTPUT && it->getNet() == nullptr) {
+        po_pool.push_back(it);
+      }
+    }
+  }
+  std::shuffle(po_pool.begin(), po_pool.end(), rng);
+  std::vector<odb::dbNet*> all_nets_snapshot;
+  for (odb::dbNet* net : builder.block()->getNets()) {
+    all_nets_snapshot.push_back(net);
+  }
 
   int T_in = static_cast<int>(std::lround(T_target * io_input_ratio));
   int T_out = T_target - T_in;
-  if (T_in + T_out > static_cast<int>(net_list.size())) {
+  const int T_in_requested = T_in;
+  if (T_in > static_cast<int>(pi_pool.size())) {
     if (logger != nullptr) {
       logger->warn(utl::UKN, kMsgRentCap,
-                   "E1: T ({}) exceeds net count ({}); capping at net count",
-                   T_in + T_out, static_cast<int>(net_list.size()));
+                   "E1: T_in ({}) exceeds available PI target pins ({}); "
+                   "capping",
+                   T_in, static_cast<int>(pi_pool.size()));
     }
-    stats.capped = true;
-    const int T_capped = static_cast<int>(net_list.size());
-    T_in = static_cast<int>(std::lround(T_capped * io_input_ratio));
-    T_out = T_capped - T_in;
+    T_in = static_cast<int>(pi_pool.size());
   }
-  const std::vector<odb::dbNet*> pi_nets(net_list.begin(),
-                                         net_list.begin() + T_in);
-  const std::vector<odb::dbNet*> po_nets(net_list.begin() + T_in,
-                                         net_list.begin() + T_in + T_out);
-  stats.T_in = T_in;
-  stats.T_out = T_out;
-  stats.T_actual = T_in + T_out;
+  stats.capped = T_in < T_in_requested;
 
   // ---- Step 3: assign pin types and insert boundary cells ----
   IoPinTypeDistribution dist =
@@ -1392,6 +1458,8 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
   }
   std::discrete_distribution<int> pick_pin_type(
       {dist.combinational, dist.buffered, dist.registered});
+  std::uniform_int_distribution<int> pick_fanout(spec.min_fanout,
+                                                 spec.max_fanout);
 
   // Reused representative masters for boundary cells: the first populated
   // combinational bucket (buffer) and the sequential class (boundary FF),
@@ -1406,35 +1474,51 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
   }
   odb::dbMaster* ff_master = plan.seq.empty() ? nullptr : plan.seq.front();
 
-  auto makeFeedNet = [&](odb::dbITerm* sink_iterm) {
-    // PI-only helper: the tiny feed net for a buffered/registered PI, whose
-    // only elements are the new instance's data-input sink and the PI
-    // bTerm itself.
+  auto makeFeedNet = [&](odb::dbITerm* sink_iterm, const std::string& bname) {
+    // The tiny feed net for a buffered/registered PI, whose only elements
+    // are the new instance's data-input sink and the PI bTerm itself.
     odb::dbNet* feed = builder.makeNet("n" + std::to_string(next_net_id++));
     sink_iterm->connect(feed);
-    const std::string bname = "pi" + std::to_string(stats.pi_nets.size());
     odb::dbBTerm* bterm = odb::dbBTerm::create(feed, bname.c_str());
     bterm->setIoType(odb::dbIoType::INPUT);
     return feed;
   };
 
-  for (odb::dbNet* net : pi_nets) {
-    odb::dbITerm* old_driver = nullptr;
-    for (odb::dbITerm* it : net->getITerms()) {
-      if (it->getIoType() == odb::dbIoType::OUTPUT) {
-        old_driver = it;
-        break;
+  int skipped_pi = 0;
+  for (int i = 0; i < T_in; ++i) {
+    const int want = pick_fanout(rng);
+    std::vector<odb::dbITerm*> targets;
+    for (int s = 0; s < want && !pi_pool.empty(); ++s) {
+      odb::dbITerm* t = pi_pool.back();
+      pi_pool.pop_back();
+      if (t->getNet() != nullptr) {
+        t->disconnect();  // stolen sink: free it from its current net first
       }
+      targets.push_back(t);
     }
-    if (old_driver != nullptr) {
-      old_driver->disconnect();
+    if (targets.empty()) {
+      ++skipped_pi;
+      if (logger != nullptr && skipped_pi <= kTraceCap) {
+        logger->warn(utl::UKN, kMsgRentSkipped,
+                     "E1: PI port {} skipped: no eligible target pins "
+                     "remain{}",
+                     i,
+                     skipped_pi == kTraceCap ? " (further skips suppressed)"
+                                            : "");
+      }
+      continue;
     }
+    const std::string bname = "pi" + std::to_string(stats.pi_nets.size());
     const IoPinKind kind = static_cast<IoPinKind>(pick_pin_type(rng));
     switch (kind) {
       case IoPinKind::kCombinational: {
-        const std::string bname = "pi" + std::to_string(stats.pi_nets.size());
+        odb::dbNet* net = builder.makeNet("n" + std::to_string(next_net_id++));
+        for (odb::dbITerm* t : targets) {
+          t->connect(net);
+        }
         odb::dbBTerm* bterm = odb::dbBTerm::create(net, bname.c_str());
         bterm->setIoType(odb::dbIoType::INPUT);
+        stats.pi_nets.push_back(net);
         ++stats.n_combinational;
         break;
       }
@@ -1443,8 +1527,13 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
             buffer_master, "u" + std::to_string(next_inst_id++));
         odb::dbITerm* out = firstOutputIterm(buf);
         odb::dbITerm* in = firstDataInputIterm(buf);
-        out->connect(net);
-        makeFeedNet(in);
+        odb::dbNet* target_net =
+            builder.makeNet("n" + std::to_string(next_net_id++));
+        out->connect(target_net);
+        for (odb::dbITerm* t : targets) {
+          t->connect(target_net);
+        }
+        stats.pi_nets.push_back(makeFeedNet(in, bname));
         stats.boundary_buf_insts.push_back(buf);
         ++stats.n_buffered;
         break;
@@ -1454,24 +1543,55 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
             ff_master, "u" + std::to_string(next_inst_id++));
         odb::dbITerm* q = firstOutputIterm(ff);
         odb::dbITerm* d = firstDataInputIterm(ff);
-        q->connect(net);
-        makeFeedNet(d);
+        odb::dbNet* target_net =
+            builder.makeNet("n" + std::to_string(next_net_id++));
+        q->connect(target_net);
+        for (odb::dbITerm* t : targets) {
+          t->connect(target_net);
+        }
+        stats.pi_nets.push_back(makeFeedNet(d, bname));
         stats.boundary_reg_insts.push_back(ff);
         ++stats.n_registered;
         ++stats.n_boundary_ff;
         break;
       }
     }
-    stats.pi_nets.push_back(net);
   }
+  const int actual_T_in = T_in - skipped_pi;
 
-  for (odb::dbNet* net : po_nets) {
+  std::uniform_int_distribution<size_t> pick_any_net(
+      0, all_nets_snapshot.empty() ? 0 : all_nets_snapshot.size() - 1);
+  int skipped_po = 0;
+  for (int i = 0; i < T_out; ++i) {
+    // Preferred: claim a leftover, never-connected driver pin on a brand
+    // new dedicated net — this REPAIRS what would otherwise be a
+    // dead-output instance. Fallback: any existing net, as one more sink.
+    odb::dbNet* target_net = nullptr;
+    if (!po_pool.empty()) {
+      odb::dbITerm* leftover_driver = po_pool.back();
+      po_pool.pop_back();
+      target_net = builder.makeNet("n" + std::to_string(next_net_id++));
+      leftover_driver->connect(target_net);
+    } else if (!all_nets_snapshot.empty()) {
+      target_net = all_nets_snapshot[pick_any_net(rng)];
+    }
+    if (target_net == nullptr) {
+      ++skipped_po;
+      if (logger != nullptr && skipped_po <= kTraceCap) {
+        logger->warn(utl::UKN, kMsgRentSkipped,
+                     "E1: PO port {} skipped: no nets exist to observe{}", i,
+                     skipped_po == kTraceCap ? " (further skips suppressed)"
+                                            : "");
+      }
+      continue;
+    }
+    const std::string bname = "po" + std::to_string(stats.po_nets.size());
     const IoPinKind kind = static_cast<IoPinKind>(pick_pin_type(rng));
     switch (kind) {
       case IoPinKind::kCombinational: {
-        const std::string bname = "po" + std::to_string(stats.po_nets.size());
-        odb::dbBTerm* bterm = odb::dbBTerm::create(net, bname.c_str());
+        odb::dbBTerm* bterm = odb::dbBTerm::create(target_net, bname.c_str());
         bterm->setIoType(odb::dbIoType::OUTPUT);
+        stats.po_nets.push_back(target_net);
         ++stats.n_combinational;
         break;
       }
@@ -1480,12 +1600,12 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
             buffer_master, "u" + std::to_string(next_inst_id++));
         odb::dbITerm* in = firstDataInputIterm(buf);
         odb::dbITerm* out = firstOutputIterm(buf);
-        in->connect(net);  // additional sink of the existing net
+        in->connect(target_net);  // additional sink; driver untouched
         odb::dbNet* feed = builder.makeNet("n" + std::to_string(next_net_id++));
         out->connect(feed);
-        const std::string bname = "po" + std::to_string(stats.po_nets.size());
         odb::dbBTerm* bterm = odb::dbBTerm::create(feed, bname.c_str());
         bterm->setIoType(odb::dbIoType::OUTPUT);
+        stats.po_nets.push_back(feed);
         stats.boundary_buf_insts.push_back(buf);
         ++stats.n_buffered;
         break;
@@ -1495,19 +1615,26 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
             ff_master, "u" + std::to_string(next_inst_id++));
         odb::dbITerm* d = firstDataInputIterm(ff);
         odb::dbITerm* q = firstOutputIterm(ff);
-        d->connect(net);  // additional sink of the existing net
+        d->connect(target_net);  // additional sink; driver untouched
         odb::dbNet* feed = builder.makeNet("n" + std::to_string(next_net_id++));
         q->connect(feed);
-        const std::string bname = "po" + std::to_string(stats.po_nets.size());
         odb::dbBTerm* bterm = odb::dbBTerm::create(feed, bname.c_str());
         bterm->setIoType(odb::dbIoType::OUTPUT);
+        stats.po_nets.push_back(feed);
         stats.boundary_reg_insts.push_back(ff);
         ++stats.n_registered;
         ++stats.n_boundary_ff;
         break;
       }
     }
-    stats.po_nets.push_back(net);
+  }
+  const int actual_T_out = T_out - skipped_po;
+
+  stats.T_in = actual_T_in;
+  stats.T_out = actual_T_out;
+  stats.T_actual = actual_T_in + actual_T_out;
+  if (skipped_pi > 0 || skipped_po > 0) {
+    stats.capped = true;
   }
 
   // ---- Step 6: actual Rent computation for the full design ----
@@ -1624,11 +1751,13 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
 
   if (logger != nullptr) {
     debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,
-               "E1: T_target {} -> T_actual {} (PI {}, PO {}); pin types "
-               "comb {} / buf {} / reg {}; k_actual {:.3f} p_actual {:.3f}",
-               T_target, stats.T_actual, stats.T_in, stats.T_out,
-               stats.n_combinational, stats.n_buffered, stats.n_registered,
-               stats.k_actual, stats.p_actual);
+               "E1: T_target {} -> T_actual {} (PI {}, PO {}, {} PI-port(s) "
+               "and {} PO-port(s) skipped for lack of eligible material); "
+               "pin types comb {} / buf {} / reg {}; k_actual {:.3f} "
+               "p_actual {:.3f}",
+               T_target, stats.T_actual, stats.T_in, stats.T_out, skipped_pi,
+               skipped_po, stats.n_combinational, stats.n_buffered,
+               stats.n_registered, stats.k_actual, stats.p_actual);
   }
   return stats;
 }

@@ -102,11 +102,16 @@ cd run
   `is_boundary_reg` never set on an internal FF, `p_actual` finite
   positive); a custom `io_input_ratio`; an all-combinational
   `io_pin_type_distribution` producing zero boundary cells; combining with
-  peak fanout sub-clusters (per-cluster + background Rent stats); all
-  validation failures (exactly-one-of `rent_k`/`rent_p`, `rent_p > 1.2`,
-  the `(1.0, 1.2]` warn-and-clamp case, bad `io_pin_type_distribution` sum,
-  out-of-range `io_input_ratio`, legacy-mix rejection); and a small-design
-  `T`-capping run that completes without crashing.
+  peak fanout sub-clusters (per-cluster + background Rent stats); the
+  strict no-dangling-instance invariant across several instance
+  counts/seeds (`NoDanglingInstancesAfterE1` — zero fully-isolated
+  instances before and after, pre-existing dead-output count never
+  increases) plus a `validateNetlist(...).ok` check in every generating
+  test; all validation failures (exactly-one-of `rent_k`/`rent_p`,
+  `rent_p > 1.2`, the `(1.0, 1.2]` warn-and-clamp case, bad
+  `io_pin_type_distribution` sum, out-of-range `io_input_ratio`, legacy-mix
+  rejection); and a small-design `T`-capping run that completes without
+  crashing.
 - `netlistgen_link_smoke.cpp` — library-linkage guard for the same engine,
   no data files needed. A plain `main()` (no GTest) that links the
   `netlistgen` library as an external consumer would

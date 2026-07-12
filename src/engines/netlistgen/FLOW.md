@@ -366,17 +366,28 @@ net formation. No-op (`RentStats{}`, `engaged = false`) unless
 enforced both-or-neither, `rent_k > 0`, `rent_p` in `(0, 1.2]` with the
 `(1.0, 1.2]` warn-and-clamp case).
 
+This is the SECOND revision of this function's Step 2/3 (see README.md's
+"Two deliberate deviations" for the full story): the first revision
+disconnected an existing net's driver for PI, which was found to leave some
+instances fully dangling (zero connections at all) — a strict, non-negotiable
+correctness bar this repo holds. Neither PI nor PO ever touches a live
+driver in the shipped design.
+
 ```mermaid
 graph TD
   chk{"rent_k and rent_p both set?"} -->|no| noop["return RentStats{} (engaged=false)"]
   chk -->|yes| t1["Step 1: G=spec.num_insts<br/>p_eff=min(rent_p,1.0)<br/>T=round(rent_k * G^p_eff)"]
-  t1 --> t2["Step 2: net_list = block.getNets(); shuffle(rng)<br/>T_in=round(T*io_input_ratio); T_out=T-T_in"]
-  t2 --> cap{"T_in+T_out > net_list.size()?"}
-  cap -->|yes| warn["warn 'E1: T (..) exceeds net count (..); capping'<br/>T_capped=net_list.size(); recompute T_in/T_out"]
-  cap -->|no| slice
-  warn --> slice["pi_nets = net_list[0..T_in)<br/>po_nets = net_list[T_in..T_in+T_out)"]
-  slice --> pi["Step 3 (PI): for each pi net,<br/>disconnect its existing driver ITerm first,<br/>then sample pin type"]
-  pi --> po["Step 3 (PO): for each po net,<br/>sample pin type (existing driver untouched)"]
+  t1 --> t2["Step 2: build pi_pool = leftover unconnected<br/>INPUT/INOUT iterms + stealable (all-but-first)<br/>sinks of fanout>=2 nets; shuffle(rng)"]
+  t2 --> t2b["build po_pool = leftover unconnected<br/>OUTPUT iterms; shuffle(rng)<br/>snapshot all_nets (PO fallback source)"]
+  t2b --> cap{"T_in > pi_pool.size()?"}
+  cap -->|yes| warn["warn 'E1: T_in (..) exceeds available<br/>PI target pins (..); capping'<br/>T_in = pi_pool.size()"]
+  cap -->|no| pi
+  warn --> pi["Step 3 (PI): for each of T_in ports,<br/>draw want=pick_fanout(rng), pop up to want<br/>pins from pi_pool (stolen ones disconnected<br/>from their current net first)"]
+  pi --> piskip{"0 pins popped?"}
+  piskip -->|yes, capped at kTraceCap| skippi["warn + skip port<br/>(not a failure — Stage D's own<br/>thin-tail-skip philosophy)"]
+  piskip -->|no| pinet["build ONE fresh net: driver =<br/>PI bTerm (combinational) or reused<br/>buf/ff output (buffered/registered);<br/>sinks = popped pins"]
+  skippi --> po
+  pinet --> po["Step 3 (PO): for each of T_out ports,<br/>pop from po_pool if non-empty (fresh net,<br/>leftover pin as driver) else pick any<br/>existing net (fallback: add as extra sink)"]
   po --> s6["Step 6: p_actual=log(T_actual)/log(G)<br/>k_actual=T_actual/G^p_actual (always 1.0 — see README)"]
   s6 --> s5{"has_any_cluster(cluster_id)?"}
   s5 -->|no| ret["return stats"]
@@ -384,19 +395,25 @@ graph TD
   clu --> ret
 ```
 
-**Step 3 pin-type dispatch**, identical branch structure for PI and PO
-(the only difference is which side of the net changes):
+**Step 3 pin-type dispatch.** PI always builds a fresh net from pool
+material; PO either builds a fresh net (leftover pin) or augments an
+existing one (fallback) — either way, an existing net's *driver* is never
+touched by either path:
 
 ```mermaid
 graph TD
-  net["net (already selected)"] --> piq{"PI or PO?"}
-  piq -->|PI| dis["disconnect net's existing driver ITerm<br/>(freed, left unused)"]
-  piq -->|PO| samp
-  dis --> samp["kind = pick_pin_type(rng)<br/>(discrete_distribution over normalised<br/>io_pin_type_distribution)"]
-  samp --> comb{"kind"}
-  comb -->|combinational| c1["PI: bTerm(net, INPUT) — net's sole driver now<br/>PO: bTerm(net, OUTPUT) — one more sink/observer"]
-  comb -->|buffered| c2["reuse first non-empty plan.comb[] master<br/>PI: buf.out -> net (replaces driver); feed-net: bTerm(IN) -> buf.in<br/>PO: buf.in -> net (extra sink); feed-net: buf.out -> bTerm(OUT)"]
-  comb -->|registered| c3["reuse plan.seq[0] master (guaranteed non-empty)<br/>PI: ff.Q -> net (replaces driver); feed-net: bTerm(IN) -> ff.D<br/>PO: ff.D -> net (extra sink); feed-net: ff.Q -> bTerm(OUT)"]
+  subgraph PI["PI (targets popped from pi_pool)"]
+    pikind["kind = pick_pin_type(rng)"] --> pic{"kind"}
+    pic -->|combinational| pc1["net = makeNet(); targets.connect(net);<br/>bTerm(net, INPUT) — net's sole driver"]
+    pic -->|buffered| pc2["reuse first non-empty plan.comb[] master<br/>target_net: buf.out drives it, targets are its sinks<br/>feed-net: bTerm(IN) -> buf.in"]
+    pic -->|registered| pc3["reuse plan.seq[0] master (guaranteed non-empty)<br/>target_net: ff.Q drives it, targets are its sinks<br/>feed-net: bTerm(IN) -> ff.D"]
+  end
+  subgraph PO["PO (target_net from po_pool or fallback)"]
+    pokind["kind = pick_pin_type(rng)"] --> poc{"kind"}
+    poc -->|combinational| oc1["bTerm(target_net, OUTPUT)<br/>— fresh net's sole sink, or one more<br/>sink on an existing net"]
+    poc -->|buffered| oc2["buf.in connects to target_net (added sink);<br/>buf.out drives a NEW feed-net with bTerm(OUT)"]
+    poc -->|registered| oc3["ff.D connects to target_net (added sink);<br/>ff.Q drives a NEW feed-net with bTerm(OUT)"]
+  end
 ```
 
 `firstOutputIterm`/`firstDataInputIterm` locate a reused master's driver pin

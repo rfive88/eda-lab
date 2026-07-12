@@ -230,20 +230,40 @@ set (exactly one alone is a validation error).
 - **Step 1 — target terminal count.** `G` = `spec.num_insts` (internal
   instances only, boundary cells not yet created). `T = round(k · Gᵖ)`;
   `T_in = round(T · io_input_ratio)` PIs, `T_out = T − T_in` POs.
-- **Step 2 — random boundary sampling.** The full post-Stage-D net list is
-  shuffled with the shared seeded RNG and sliced into disjoint `pi_nets` /
-  `po_nets`. If `T_in + T_out` exceeds the net count (small designs), `T` is
-  capped at the net count and a warning is logged (`E1: T (...) exceeds net
-  count (...); capping at net count`) — no crash, no stall.
+- **Step 2 — safe target-pin pools** (revised from the brief's literal
+  "select existing nets" model — see "Two deliberate deviations" below for
+  why). `pi_pool` = every currently-unconnected `INPUT`/`INOUT` iterm
+  (Stage D's own "thin tail" leftovers) plus, as a fallback, all-but-one
+  sink of every net with fanout ≥ 2 (stealable without ever leaving that
+  net's driver sinkless). `po_pool` = every currently-unconnected `OUTPUT`
+  iterm (Stage D's own "skipped driver" leftovers). Both shuffled once with
+  the shared seeded RNG. `T_in` is capped down to `pi_pool.size()` up front
+  if it exceeds it (warned: `E1: T_in (...) exceeds available PI target
+  pins (...); capping`); `T_out` has no equivalent hard cap (its fallback —
+  see Step 3 — is always available as long as at least one net exists).
 - **Step 3 — pin type + boundary cell insertion**, sampled independently per
-  net from `io_pin_type_distribution` (combinational / buffered /
-  registered). Buffer/FF cells reuse the statistical mix's first non-empty
-  combinational bucket and its sequential class (the latter guaranteed
-  non-empty by Stage D's `sequential_ratio > 0` bootstrap rule) — works
-  identically in synthetic and LEF mode, no extra master-sourcing logic.
-  Naming continues the existing `u<i>`/`n<i>` sequences; **planes, not
-  names**, distinguish a boundary cell from an internal one (same
-  philosophy as `hgm.is_boundary_reg` vs. internal registers).
+  port from `io_pin_type_distribution` (combinational / buffered /
+  registered). **PI**: draws a fanout-shaped count of target pins from
+  `pi_pool` (same `[min_fanout, max_fanout]` draw Stage D itself uses) and
+  builds one fresh net per port — driver = the PI `dbBTerm` (combinational)
+  or a reused boundary buffer/FF's output (buffered/registered), sinks = the
+  drawn pool pins; a port that draws zero pins (pool exhausted mid-run) is
+  **skipped**, not a failure (logged, capped at `kTraceCap`, mirroring
+  Stage D's own thin-tail-skip philosophy exactly). **PO**: prefers popping
+  one pin from `po_pool` onto a brand-new dedicated net (repairing a
+  pre-existing dead-output instance); once that pool is empty, falls back
+  to picking any currently-formed net and simply adding one more sink onto
+  it (`bTerm` directly, or a buffer/FF's input) — always safe, since a
+  net's existing driver is never touched either way. Buffer/FF cells reuse
+  the statistical mix's first non-empty combinational bucket and its
+  sequential class (the latter guaranteed non-empty by Stage D's
+  `sequential_ratio > 0` bootstrap rule) — works identically in synthetic
+  and LEF mode, no extra master-sourcing logic. Naming continues the
+  existing `u<i>`/`n<i>` sequences; **planes, not names**, distinguish a
+  boundary cell from an internal one (same philosophy as
+  `hgm.is_boundary_reg` vs. internal registers). `RentStats.T_in`/`T_out`/
+  `T_actual` reflect what was actually achieved (may be less than Rent's
+  rule requested if a port had to be skipped).
 - **Step 5 — sub-cluster (+ background) Rent stats**, when the peak
   fanout sub-cluster feature is also engaged: per cluster, `G_c` = original
   internal instances in the cluster (boundary buf/FF cells excluded, same
@@ -265,29 +285,63 @@ set (exactly one alone is a validation error).
 
 ### Two deliberate deviations from a literal reading of the brief
 
-**1. A PI-selected net's existing driver is REPLACED, never "added
-alongside."** The brief's own pseudocode says a PI becomes "an additional
-driver" of a randomly-selected *existing* net — but every net Stage D forms
-already has exactly one committed internal driver, and this repo treats
-"exactly one driver per net" as a hard, enforced invariant
-(`validateNetlist`). Two drivers on one net is also not how real designs
-work: a net is driven either by a primary input or by an internal
+**1. PI/PO never touch a live driver at all — this is the SECOND revision
+of this design, not the first.** The brief's own pseudocode says a PI
+becomes "an additional driver" of a randomly-selected *existing* net — but
+every net Stage D forms already has exactly one committed internal driver,
+and this repo treats "exactly one driver per net" as a hard, enforced
+invariant (`validateNetlist`). Two drivers on one net is also not how real
+designs work: a net is driven either by a primary input or by an internal
 instance's output, never both (confirmed as the intended semantics before
-implementing). So for a PI net, the existing driver `dbITerm` is
-**disconnected** (freed, left unused — a harmless dangling pin) and the PI's
-`dbBTerm(INPUT)` becomes the net's sole driver; for **buffered**/
-**registered** PI, the new boundary cell's output pin takes over as the
-net's driver instead of a bare bTerm. A PO has no such conflict — its
-`dbBTerm(OUTPUT)` (or, for buffered/registered, the new cell's input pin) is
-simply one more sink/observer alongside the net's unchanged existing driver
-and sinks (nets already support arbitrary fanout). **This is why
-`netlist_validation.cpp` now folds `dbBTerm`s into its driver/sink tally**
-(an `INPUT` bTerm counts as a driver, `OUTPUT`/`INOUT` as a sink) — additive
-and symmetric with the existing `dbITerm` rule (a net with no bterms, i.e.
-every net before this stage, tallies identically to before); this was
-already the documented "Stage E can fold primary-input/-output dbBTerms
-into the same driver/sink counts" extension point left in
-`netlist_validation.h` since Stage C.
+implementing).
+
+The **first** revision fixed that by having a PI-selected net's existing
+driver `dbITerm` **disconnect** (freed, "harmlessly" left unused) and the
+PI's `dbBTerm(INPUT)` become the net's sole driver. That turned out to be
+wrong too: **an instance whose output drives nothing is dead logic — not a
+harmless side effect — and this repo treats "no dangling instances" as an
+equally hard, strict invariant** (confirmed explicitly, after empirically
+measuring the first revision's effect: on a 2000-instance run it left 23
+instances with *zero* connections at all, on top of ~120 more with a merely
+unused output — the former is a correctness bug, not a rounding error, and
+"delete the dead instance" is not a safe fix either, since deletion can
+cascade backward through anything that fed *only* that instance, shrinking
+`G` unpredictably away from the very count Rent's rule is supposed to be
+anchored to).
+
+The design actually shipped (see Steps 2–3 above) instead **never
+disconnects a live driver, for either PI or PO**:
+- **PI** targets Stage D's own leftover, never-connected internal input
+  pins first (abundant in practice — e.g. ~1600 of them on a 2000-inst run
+  in one measurement, versus a typical `T_in` in the low hundreds), falling
+  back to *stealing* a non-last sink of an already-multi-sink net (which by
+  construction never leaves that net's driver sinkless) only once that pool
+  runs dry.
+- **PO** prefers claiming a leftover, never-connected internal output pin —
+  which *repairs* what would otherwise be a dead-output instance by giving
+  it a real destination — falling back to simply adding one more sink onto
+  any existing, already-driven net (always safe; nets already support
+  arbitrary fanout) once that pool is exhausted.
+
+Neither path ever needs to disconnect, delete, or "salvage" anything, so
+there is no cascading-deletion risk and `G` never drifts from
+`spec.num_insts`. `test/netlistgen_rent_test.cpp`'s
+`NoDanglingInstancesAfterE1` is the direct correctness test: across several
+instance counts and seeds, it confirms zero fully-isolated instances both
+before and after Stage E1 runs, and that the pre-existing
+dead-output-instance count (Stage D's own, unrelated to this feature) never
+*increases* — Stage E1 may only ever repair some of it.
+
+**This is still why `netlist_validation.cpp` folds `dbBTerm`s into its
+driver/sink tally** (an `INPUT` bTerm counts as a driver, `OUTPUT`/`INOUT`
+as a sink) — additive and symmetric with the existing `dbITerm` rule (a net
+with no bterms, i.e. every net before this stage, tallies identically to
+before); this was already the documented "Stage E can fold
+primary-input/-output dbBTerms into the same driver/sink counts" extension
+point left in `netlist_validation.h` since Stage C, and it's what lets
+every Stage E1-generated net — including the fresh ones built from pool
+material — validate cleanly under the *same* "exactly one driver, ≥1 sink"
+rule as any other net.
 
 **2. netlistgen never touches the Hypergraph engine.** The brief's
 pseudocode calls `hg.add_vertex()` / `hg.set_bool_attr(vertex, name, true)`
@@ -747,11 +801,16 @@ ctest --test-dir build -R "netlistgen" --output-on-failure
   all-combinational `io_pin_type_distribution` producing zero boundary
   cells; combining with peak fanout sub-clusters (per-cluster + background
   Rent stats, a non-asserting soft check that cluster `p_c` tends above
-  background `p_bg`); all validation failures (exactly-one-of
-  `rent_k`/`rent_p`, `rent_p > 1.2`, the `(1.0, 1.2]` warn-and-clamp case,
-  bad `io_pin_type_distribution` sum, out-of-range `io_input_ratio`,
-  legacy-mix rejection); and a small-design `T`-capping run that completes
-  without crashing.
+  background `p_bg`); the strict **no-dangling-instance** invariant
+  (`NoDanglingInstancesAfterE1`, across several instance counts and seeds:
+  zero fully-isolated instances before and after Stage E1, and the
+  pre-existing dead-output-instance count only ever goes down, never up —
+  see "Two deliberate deviations" above) plus a `validateNetlist(...).ok`
+  check folded into every generating test; all validation failures
+  (exactly-one-of `rent_k`/`rent_p`, `rent_p > 1.2`, the `(1.0, 1.2]`
+  warn-and-clamp case, bad `io_pin_type_distribution` sum, out-of-range
+  `io_input_ratio`, legacy-mix rejection); and a small-design `T`-capping
+  run that completes without crashing.
 - `test/netlistgen_link_smoke.cpp` — library-linkage guard.
 
 Scale reference: ~500k insts / ~1.4M pins generate in about 2 s (synthetic).

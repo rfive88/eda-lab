@@ -372,16 +372,22 @@ rule (`T = k·Gᵖ`). Structural Verilog output is Stage E2 — see
     the pools Stage D already computed as eligible, so the DAG guarantee is
     untouched. Requires the statistical mix.
   - **Primary I/O generation via Rent's rule** (Stage E1, optional): sizes a
-    PI/PO terminal count from `T = k·Gᵖ`, randomly samples that many
-    already-formed nets, and inserts combinational/buffered/registered
-    boundary cells, reusing the statistical mix's representative masters. A
-    PI **replaces** its selected net's existing driver rather than adding a
-    second one (`netlist_validation.cpp` now folds `dbBTerm`s into its
-    driver/sink tally); a PO is just one more sink/observer. `netlistgen`
-    still never touches the `Hypergraph` engine — `RentStats` returns raw
-    `dbNet*`/`dbInst*` lists (`hgm.is_pi`/`is_po` are naturally hyperedge
-    planes, `is_boundary_buf`/`is_boundary_reg` vertex planes, but building
-    them is the caller's job). Requires the statistical mix.
+    PI/PO terminal count from `T = k·Gᵖ` and inserts combinational/buffered/
+    registered boundary cells, reusing the statistical mix's representative
+    masters. **Never touches a live driver, for either PI or PO** — this
+    repo treats "no dangling instances" (an instance whose output drives
+    nothing) as strictly as "no multiply-driven nets," so PI targets Stage
+    D's own leftover, never-connected internal input pins first, falling
+    back to stealing a non-last sink of a multi-sink net only if that's
+    empty; PO prefers claiming a leftover, never-connected output pin
+    (repairing a dead-output instance), falling back to adding one more
+    sink onto any existing net. `netlist_validation.cpp` folds `dbBTerm`s
+    into its driver/sink tally so every generated net — fresh or augmented
+    — validates under the same rule. `netlistgen` still never touches the
+    `Hypergraph` engine — `RentStats` returns raw `dbNet*`/`dbInst*` lists
+    (`hgm.is_pi`/`is_po` are naturally hyperedge planes,
+    `is_boundary_buf`/`is_boundary_reg` vertex planes, but building them is
+    the caller's job). Requires the statistical mix.
 
 Tests: `test/netlistgen_test.cpp` (Stage A, no data files),
 `netlistgen_stageb_test.cpp` (statistical mix / LEF classification),

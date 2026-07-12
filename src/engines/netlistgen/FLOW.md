@@ -128,8 +128,9 @@ graph TD
 ## `netlistgen.cpp` — `generateSynthetic()` dispatch
 
 `validateSpecConfig` runs first (config-only checks). If a LEF path is set,
-`loadLef` runs before any instance. Then the spec selects the legacy or
-statistical path; both end in the shared `formNets`.
+`loadLef` runs before any instance. Then the spec selects the legacy path
+(ending in the shuffled-pool `formNets`) or the statistical path (ending in
+the Stage D ordered `formNetsAcyclic`).
 
 ```mermaid
 graph TD
@@ -163,7 +164,7 @@ finishes with `formNets` and the post-generation tolerance check.
 graph TD
   bp["buildPlan(builder, spec, plan)"] --> lm{"LEF mode?"}
   lm -->|yes| pop["populateLefBuckets:<br/>clock gate (GCK/GCLK/ECK out) -> drop (log)<br/>clock-pin (sig type or name) -> seq class<br/>latch (G/GN gate, no clock) -> drop (log)<br/>1 output + bucket by signalPinCount<br/>multi-output / no-bucket -> exclude (log)<br/>anchors = measured bucket means"]
-  lm -->|no| anc["anchors = {2,3,4,5,6}"]
+  lm -->|no| anc["anchors = {2,3,4,5,7}<br/>(6+ bucket = 7-pin rep, fanout 6)"]
   pop --> rp
   anc --> rp["resolveProbabilities"]
   rp --> modeA{"Mode A?"}

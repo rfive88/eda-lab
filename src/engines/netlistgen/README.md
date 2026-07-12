@@ -133,7 +133,8 @@ correspondingly **more input pins left unconnected**.
   the synthetic and LEF paths.
 - **Five combinational buckets** by signal-pin count: **2, 3, 4, 5, 6-or-more**
   (2-pin = buffer/inverter, 3-pin = 2-input gate, …). In synthetic mode the
-  "6+" bucket is pinned to exactly 6.
+  "6+" bucket is pinned to a single 7-pin representative (`COMB_7`, fanout 6)
+  — raised from 6 so Mode B can target average fanouts up to 6 inclusive.
 - **Two mutually exclusive combinational modes** (exactly one required when
   the statistical mix is engaged; both or neither → fail fast):
   - **Mode A — forward:** `combinational_pin_distribution`, five percentages
@@ -147,8 +148,11 @@ correspondingly **more input pins left unconnected**.
     mean equals that — a single scalar `θ` found by bisection
     (`maxEntropyDistribution`, plain `<cmath>`). This spreads mass across all
     buckets as evenly as the mean constraint allows, with no user-supplied
-    prior. The derived distribution is logged. The target must lie strictly
-    inside the fanout range: the anchor range minus one (synthetic: `(1, 5)`).
+    prior. The derived distribution is logged. The target must lie inside the
+    fanout range — the anchor range minus one — with the lower bound
+    exclusive and the upper bound **inclusive** (synthetic: `(1, 6]`). At
+    exactly the upper bound the distribution degenerates to 100% top bucket
+    (every combinational cell is the 7-pin representative).
 - **Sequential cells** get one fixed representative profile this stage
   (synthetic: `D, CK, Q` = 3 signal pins, with `CK` a real `dbSigType::CLOCK`
   pin so the cell reads as sequential via `isSequentialMaster`). No pin-count
@@ -382,7 +386,7 @@ Consumed downstream by `Hypergraph::buildFromBlock()`.
 | `cell_lef_paths` | `std::vector<std::string>` | `{}` | Extra cell LEF(s) against that tech. |
 | `sequential_ratio` | `std::optional<double>` | unset (→ 0.0, **fails validation**) | Fraction of instances that are sequential; must be `> 0` in statistical mode (Stage D bootstrap-source rule). |
 | `combinational_pin_distribution` | `std::optional<array<double,5>>` | unset | Mode A percentages `[2,3,4,5,6+]`, sum 100. |
-| `target_avg_fanout` | `std::optional<double>` | unset | Mode B target mean fanout (signal pins minus the driver, `#pins−1`); synthetic range `(1, 5)`. |
+| `target_avg_fanout` | `std::optional<double>` | unset | Mode B target mean fanout (signal pins minus the driver, `#pins−1`); synthetic range `(1, 6]` (upper bound inclusive). |
 | `distribution_tolerance_pct` | `double` | `2.0` | Post-gen deviation warning threshold. |
 
 `MasterSpec`: `name`, `num_inputs` (2), `num_outputs` (1), `weight` (1.0).

@@ -64,9 +64,12 @@ namespace eda {
 inline constexpr int kNumCombBuckets = 5;
 
 // Pin-count anchor for each bucket in *synthetic* mode. Bucket "6-or-more"
-// is pinned to exactly 6 (a fixed value, not a range) this stage.
+// is pinned to a single 7-pin representative (fanout 6, a fixed value, not a
+// range): with the top anchor at 7, Mode B can reach mean fanouts up to and
+// INCLUDING 6 — at exactly 6 the derived distribution degenerates to 100%
+// top bucket. (It was 6 before; raised so avg fanout 6 is representable.)
 inline constexpr std::array<double, kNumCombBuckets> kSyntheticBucketAnchors =
-    {2.0, 3.0, 4.0, 5.0, 6.0};
+    {2.0, 3.0, 4.0, 5.0, 7.0};
 
 class NetlistBuilder
 {
@@ -198,8 +201,10 @@ struct SyntheticNetlistSpec
   // Mode B (inverse): desired average combinational fanout, i.e. load pins per
   // net — a cell's signal pins EXCLUDING its single driver/output pin (#pins-1).
   // The generator back-solves a maximum-entropy pin-count bucket distribution
-  // (anchors are pin counts = fanout+1) to hit it. Must be strictly inside the
-  // fanout range (synthetic: (1, 5); LEF: the measured anchor range minus one).
+  // (anchors are pin counts = fanout+1) to hit it. Must be inside the fanout
+  // range, lower bound EXCLUSIVE, upper bound INCLUSIVE (synthetic: (1, 6];
+  // LEF: the measured anchor range minus one). At exactly the upper bound the
+  // distribution degenerates to 100% top bucket.
   std::optional<double> target_avg_fanout;
 
   // After generation, empirical proportions are compared against the
@@ -252,16 +257,17 @@ bool isClockGateMaster(odb::dbMaster* master);
 // distribution summing to 100, sequential_ratio in (0, 1] (strictly positive
 // since Stage D — the acyclic net formation needs sequential Q outputs as
 // its bootstrap signal source until Stage E adds primary inputs), and
-// target_avg_fanout strictly inside the synthetic fanout range (1, 5). Logs the
+// target_avg_fanout inside the synthetic fanout range (1, 6]. Logs the
 // first problem via `logger` (if non-null) and returns false. Returns true
 // for legacy-mode specs (they are validated by generateSynthetic itself).
 bool validateSpecConfig(const SyntheticNetlistSpec& spec, utl::Logger* logger);
 
 // Maximum-entropy bucket distribution over `anchors` whose weighted mean
 // equals `target_mean`: p_i = exp(theta*a_i)/Z with a single scalar theta
-// found by bisection. `target_mean` must lie strictly inside
-// [min(anchors), max(anchors)]. Spreads mass across all buckets as evenly
-// as the mean constraint allows.
+// found by bisection. `target_mean` must lie in (min(anchors), max(anchors)]
+// — at exactly max(anchors) the bisection saturates (theta = 50) and the
+// result is numerically the degenerate all-top-bucket distribution. Spreads
+// mass across all buckets as evenly as the mean constraint allows.
 std::array<double, kNumCombBuckets> maxEntropyDistribution(
     const std::array<double, kNumCombBuckets>& anchors,
     double target_mean);

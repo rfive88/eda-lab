@@ -72,6 +72,21 @@ TEST(MaxEntropyTest, SymmetricTargetIsUniform)
   }
 }
 
+TEST(MaxEntropyTest, InclusiveTopBoundaryDegenerates)
+{
+  // A target at exactly the top anchor saturates the bisection (theta = 50)
+  // and yields the degenerate all-top-bucket distribution — this is what
+  // makes the upper bound of target_avg_fanout inclusive.
+  const auto p = maxEntropyDistribution(kSyntheticBucketAnchors,
+                                        kSyntheticBucketAnchors.back());
+  EXPECT_NEAR(p[kNumCombBuckets - 1], 1.0, 1e-9);
+  double mean = 0.0;
+  for (int i = 0; i < kNumCombBuckets; ++i) {
+    mean += p[i] * kSyntheticBucketAnchors[i];
+  }
+  EXPECT_NEAR(mean, kSyntheticBucketAnchors.back(), 1e-9);
+}
+
 // ---------------------------------------------------------------------------
 // Spec-config validation (no LEF needed)
 // ---------------------------------------------------------------------------
@@ -90,11 +105,17 @@ TEST(SpecValidationTest, ModeBValid)
   SyntheticNetlistSpec spec;
   spec.num_insts = 10;
   spec.sequential_ratio = 0.1;  // Stage D: mandatory > 0 in statistical mode
-  spec.target_avg_fanout = 3.5;  // fanout (pins-1); valid range is (1, 5)
+  spec.target_avg_fanout = 3.5;  // fanout (pins-1); valid range is (1, 6]
   EXPECT_TRUE(validateSpecConfig(spec, nullptr));
   // A fanout of 2 (pin-count target 3) is well inside the range — it was
   // previously rejected when the field was mis-treated as a pin count.
   spec.target_avg_fanout = 2.0;
+  EXPECT_TRUE(validateSpecConfig(spec, nullptr));
+  // The upper bound is INCLUSIVE (top anchor is the 7-pin representative,
+  // fanout 6): 6.0 is valid and degenerates to 100% top bucket.
+  spec.target_avg_fanout = 6.0;
+  EXPECT_TRUE(validateSpecConfig(spec, nullptr));
+  spec.target_avg_fanout = 5.0;  // previously the (rejected) upper boundary
   EXPECT_TRUE(validateSpecConfig(spec, nullptr));
 }
 
@@ -127,13 +148,14 @@ TEST(SpecValidationTest, DistributionMustSumTo100)
 TEST(SpecValidationTest, TargetOutOfRangeFails)
 {
   // target_avg_fanout is a fanout (pins-1); the synthetic valid range is the
-  // pin-count anchor range (2, 6) shifted down by one => (1, 5), strict.
+  // pin-count anchor range (2, 7] shifted down by one => (1, 6] — lower
+  // bound exclusive, upper bound inclusive.
   SyntheticNetlistSpec spec;
   spec.num_insts = 10;
   spec.sequential_ratio = 0.1;  // valid, so the failure is the bad target
-  spec.target_avg_fanout = 5.0;  // upper boundary of (1, 5)
+  spec.target_avg_fanout = 6.5;  // above the inclusive upper bound 6
   EXPECT_FALSE(validateSpecConfig(spec, nullptr));
-  spec.target_avg_fanout = 1.0;  // lower boundary
+  spec.target_avg_fanout = 1.0;  // lower boundary (exclusive)
   EXPECT_FALSE(validateSpecConfig(spec, nullptr));
   spec.target_avg_fanout = 0.5;  // below range
   EXPECT_FALSE(validateSpecConfig(spec, nullptr));
@@ -452,6 +474,35 @@ TEST(StatisticalMixTest, ModeBSyntheticMeanMatchesTarget)
   }
   const double mean_fanout = static_cast<double>(pins) / n - 1.0;
   EXPECT_NEAR(mean_fanout, 3.5, 0.15);
+}
+
+// The inclusive upper bound end to end: target_avg_fanout = 6 generates (it
+// was rejected before the top anchor moved to 7), and every combinational
+// instance is the 7-pin top-bucket representative, so the mean combinational
+// fanout is exactly 6.
+TEST(StatisticalMixTest, ModeBTargetSixIsAllTopBucket)
+{
+  NetlistBuilder nb;
+  SyntheticNetlistSpec spec;
+  spec.num_insts = 2000;
+  spec.sequential_ratio = 0.1;
+  spec.target_avg_fanout = 6.0;
+  spec.seed = 23;
+  ASSERT_GT(generateSynthetic(nb, spec), 0);
+
+  long pins = 0;
+  int comb = 0;
+  for (odb::dbInst* inst : nb.block()->getInsts()) {
+    if (isSequentialMaster(inst->getMaster())) {
+      continue;
+    }
+    EXPECT_EQ(signalPinCount(inst->getMaster()), 7)
+        << inst->getMaster()->getName();
+    pins += signalPinCount(inst->getMaster());
+    ++comb;
+  }
+  ASSERT_GT(comb, 0);
+  EXPECT_DOUBLE_EQ(static_cast<double>(pins) / comb - 1.0, 6.0);
 }
 
 // A deliberately-tight tolerance still succeeds (the mismatch is a logged

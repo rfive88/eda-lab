@@ -303,16 +303,18 @@ bool validateSpecConfig(const SyntheticNetlistSpec& spec, utl::Logger* logger)
     // Mode B synthetic-anchor range check. target_avg_fanout is a FANOUT (load
     // pins per net, i.e. signal pins excluding the single driver/output pin), so
     // it maps onto the pin-count anchors as fanout + 1. Equivalently, the valid
-    // fanout range is the anchor range shifted down by one. In LEF mode the
-    // range is re-checked against measured anchors during plan building.
+    // fanout range is the anchor range shifted down by one — lower bound
+    // exclusive, upper bound INCLUSIVE (at the top the max-entropy solve
+    // degenerates to 100% top bucket, which hits the mean exactly). In LEF
+    // mode the range is re-checked against measured anchors during plan
+    // building.
     const double t_pins = *spec.target_avg_fanout + 1.0;
     const double lo = kSyntheticBucketAnchors.front();
     const double hi = kSyntheticBucketAnchors.back();
-    if (!spec.tech_lef_path.has_value() && (t_pins <= lo || t_pins >= hi)) {
+    if (!spec.tech_lef_path.has_value() && (t_pins <= lo || t_pins > hi)) {
       if (logger) {
         logger->warn(utl::UKN, kMsgTargetRange,
-                     "target_avg_fanout must be strictly inside ({}, {}), "
-                     "got {}",
+                     "target_avg_fanout must be in ({}, {}], got {}",
                      lo - 1.0, hi - 1.0, *spec.target_avg_fanout);
       }
       return false;
@@ -630,11 +632,13 @@ bool resolveProbabilities(const SyntheticNetlistSpec& spec, GenPlan& plan,
   const double target_pins = target_fanout + 1.0;
   const double lo = *std::min_element(plan.anchors.begin(), plan.anchors.end());
   const double hi = *std::max_element(plan.anchors.begin(), plan.anchors.end());
-  if (target_pins <= lo || target_pins >= hi) {
+  // Lower bound exclusive, upper bound inclusive (degenerate all-top-bucket
+  // distribution at exactly the top anchor) — same rule as validateSpecConfig.
+  if (target_pins <= lo || target_pins > hi) {
     if (logger) {
       logger->warn(utl::UKN, kMsgTargetRange,
-                   "target_avg_fanout {} is outside the measured fanout "
-                   "range ({}, {})",
+                   "target_avg_fanout {} is outside the valid fanout "
+                   "range ({}, {}]",
                    target_fanout, lo - 1.0, hi - 1.0);
     }
     return false;

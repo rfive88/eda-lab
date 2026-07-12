@@ -7,7 +7,7 @@ GTest suites for eda-lab.
 ```bash
 cmake -B build              # Debug tree; build-release/ is the Release tree
 cmake --build build
-ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_stageb_test|netlistgen_stagec_test|netlistgen_staged_test|netlistgen_link_smoke|fm_partitioner_test|cli_help_test|error_handling_test" --output-on-failure
+ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_stageb_test|netlistgen_stagec_test|netlistgen_staged_test|netlistgen_peak_cluster_test|netlistgen_link_smoke|fm_partitioner_test|cli_help_test|error_handling_test" --output-on-failure
 ```
 
 The `-R` filter matters: a bare `ctest` also picks up the vendored OpenROAD
@@ -81,6 +81,17 @@ cd run
   case (loosened receiver counts / skipped tail drivers, never a sinkless
   net, deterministic on rerun); and a spawned-CLI DEF round-trip confirmed
   loop-free.
+- `netlistgen_peak_cluster_test.cpp` — peak fanout sub-clusters (congestion
+  hot-spot generation layered on the statistical mix + Stage D), no data
+  files needed. Covers: no-peak-params leaves cluster bookkeeping empty;
+  basic single-cluster generation (instance/cluster counts, Stage D DAG
+  still valid, cluster-driven net fanout measurably above the global average
+  and within 20% of `peak_avg_fanout`); `assignPeakClusters` directly
+  (multi-cluster sizing, seed determinism) and via `generateSynthetic` for
+  `num_peak_clusters=3`; all four validation failures (below-background
+  target, out-of-range `peak_cluster_pct`, `num_peak_clusters=0`,
+  legacy-mix rejection) and the "ignored when `peak_avg_fanout` absent"
+  rule; and the `peak_cluster_pct`/`num_peak_clusters` defaults.
 - `netlistgen_link_smoke.cpp` — library-linkage guard for the same engine,
   no data files needed. A plain `main()` (no GTest) that links the
   `netlistgen` library as an external consumer would

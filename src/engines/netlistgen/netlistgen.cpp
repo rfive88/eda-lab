@@ -7,6 +7,7 @@
 #include <cmath>
 #include <filesystem>
 #include <initializer_list>
+#include <numeric>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -44,6 +45,18 @@ constexpr int kMsgTolerance = 309;
 constexpr int kMsgLefLoad = 310;
 constexpr int kMsgNoLefMasters = 311;
 constexpr int kMsgSeqBootstrap = 312;
+constexpr int kMsgPeakConfig = 313;
+
+// Implementation constant: fraction of a cluster net's sink slots preferring
+// an intra-cluster receiver over background. Not exposed in the JSON config
+// (spec brief: "p_intra = 0.8, hardcoded").
+constexpr double kPeakIntraClusterProb = 0.8;
+// Rejection-sampling cap for "pick an eligible receiver in cluster c": after
+// this many misses, fall back to any eligible receiver (background). Keeps
+// the draw O(1) in the common case while still degrading gracefully — same
+// as the brief's documented edge case ("cluster c has fewer [eligible] cells
+// than the requested fanout") — to background, never a duplicate/stalled pick.
+constexpr int kPeakClusterPickAttempts = 20;
 
 // Bucket 0..4 for a signal-pin count: 2->0, 3->1, 4->2, 5->3, >=6->4.
 // Anything below 2 (tie/fill/antenna cells) belongs to no bucket.
@@ -221,6 +234,27 @@ std::array<double, kNumCombBuckets> maxEntropyDistribution(
   return p;
 }
 
+std::vector<int> assignPeakClusters(int num_insts,
+                                    double peak_cluster_pct,
+                                    int num_peak_clusters,
+                                    std::mt19937& rng)
+{
+  std::vector<int> cluster_id(num_insts, -1);
+  std::vector<int> order(num_insts);
+  std::iota(order.begin(), order.end(), 0);
+  std::shuffle(order.begin(), order.end(), rng);
+
+  const int cluster_size = static_cast<int>(
+      std::floor(peak_cluster_pct * num_insts / num_peak_clusters));
+  int pos = 0;
+  for (int k = 0; k < num_peak_clusters; ++k) {
+    for (int j = 0; j < cluster_size; ++j, ++pos) {
+      cluster_id[order[pos]] = k;
+    }
+  }
+  return cluster_id;
+}
+
 bool validateSpecConfig(const SyntheticNetlistSpec& spec, utl::Logger* logger)
 {
   if (spec.num_insts <= 0) {
@@ -230,6 +264,22 @@ bool validateSpecConfig(const SyntheticNetlistSpec& spec, utl::Logger* logger)
     return false;
   }
   if (!spec.usesStatisticalMix()) {
+    // Peak fanout sub-clusters need per-instance sequential/combinational
+    // classification to build cluster-safe eligibility from (they piggyback
+    // on formNetsAcyclic's pools) — not available on the legacy weighted-mix
+    // path, so reject rather than silently ignoring the peak_avg_fanout the
+    // caller asked for.
+    if (spec.peak_avg_fanout.has_value()) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgPeakConfig,
+                     "peak_avg_fanout requires the statistical mix to be "
+                     "engaged (set sequential_ratio, target_avg_fanout, "
+                     "combinational_pin_distribution, or tech_lef_path); "
+                     "peak clustering is not supported in the legacy "
+                     "weighted-mix path");
+      }
+      return false;
+    }
     // Legacy weighted mix: generateSynthetic checks masters non-emptiness.
     return true;
   }
@@ -316,6 +366,46 @@ bool validateSpecConfig(const SyntheticNetlistSpec& spec, utl::Logger* logger)
         logger->warn(utl::UKN, kMsgTargetRange,
                      "target_avg_fanout must be in ({}, {}], got {}",
                      lo - 1.0, hi - 1.0, *spec.target_avg_fanout);
+      }
+      return false;
+    }
+  }
+
+  // Peak fanout sub-clusters (optional, layered on the statistical mix — see
+  // netlistgen.h). Ignored entirely (rules 2/3 below not checked) when
+  // peak_avg_fanout itself is unset, per the spec's "ignore the other two
+  // fields even if present" rule.
+  if (spec.peak_avg_fanout.has_value()) {
+    // "avg_fanout" has no literal field in this codebase (background fanout
+    // is a [min_fanout, max_fanout] range, not a single scalar); the closest
+    // analog is the midpoint of that range, which is what peak_avg_fanout
+    // must exceed to be a genuine hot spot.
+    const double background_avg =
+        (spec.min_fanout + spec.max_fanout) / 2.0;
+    if (*spec.peak_avg_fanout <= background_avg) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgPeakConfig,
+                     "peak_avg_fanout must be greater than the background "
+                     "average fanout {} (= (min_fanout + max_fanout) / 2), "
+                     "got {}",
+                     background_avg, *spec.peak_avg_fanout);
+      }
+      return false;
+    }
+    if (spec.peak_cluster_pct.has_value()
+        && (*spec.peak_cluster_pct <= 0.0 || *spec.peak_cluster_pct >= 1.0)) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgPeakConfig,
+                     "peak_cluster_pct must be in (0, 1), got {}",
+                     *spec.peak_cluster_pct);
+      }
+      return false;
+    }
+    if (spec.num_peak_clusters.has_value() && *spec.num_peak_clusters < 1) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgPeakConfig,
+                     "num_peak_clusters must be >= 1, got {}",
+                     *spec.num_peak_clusters);
       }
       return false;
     }
@@ -807,9 +897,22 @@ int formNets(NetlistBuilder& builder,
 // receivers than min_fanout (>= 1, counted + debug-logged), and a driver with
 // ZERO eligible receivers forms no net at all (skipped, counted +
 // debug-logged) — deterministic, never a sinkless net, never a stall.
+//
+// Peak fanout sub-clusters (optional; see netlistgen.h): when
+// spec.peak_avg_fanout is set, a per-instance cluster id is assigned once up
+// front (assignPeakClusters) and a net driven from inside a cluster draws its
+// receiver count from a distribution centred on peak_avg_fanout (same
+// uniform shape/width as the background, just re-centred) and prefers
+// intra-cluster receivers for a p_intra fraction of its sink slots — via
+// rejection sampling capped at kPeakClusterPickAttempts, so a scarce/depleted
+// cluster falls back to any eligible receiver rather than stalling or
+// duplicating a sink. Cluster preference only ever narrows a pick WITHIN the
+// eligible pools above; it can never make an ineligible iterm eligible, so
+// the acyclicity guarantee is unaffected by clustering.
 int formNetsAcyclic(NetlistBuilder& builder,
                     const std::vector<odb::dbInst*>& insts,
-                    const SyntheticNetlistSpec& spec, std::mt19937& rng)
+                    const SyntheticNetlistSpec& spec, std::mt19937& rng,
+                    std::vector<int>* out_cluster_id = nullptr)
 {
   const int n = static_cast<int>(insts.size());
   utl::Logger* logger = builder.logger();
@@ -827,6 +930,31 @@ int formNetsAcyclic(NetlistBuilder& builder,
   std::vector<std::vector<odb::dbITerm*>> comb_inputs_of(n);
   std::vector<char> inst_is_seq(n, 0);
 
+  // Peak fanout sub-clusters: assigned once, up front, from the same rng
+  // used by the rest of generation. cluster_id stays empty when the feature
+  // is not engaged (peak_enabled false) — every lookup below then reports
+  // background (-1), so the rest of this function is unchanged in that case.
+  const bool peak_enabled = spec.peak_avg_fanout.has_value();
+  std::vector<int> cluster_id;
+  if (peak_enabled) {
+    cluster_id = assignPeakClusters(n, spec.peak_cluster_pct.value_or(0.10),
+                                    spec.num_peak_clusters.value_or(1), rng);
+    if (out_cluster_id != nullptr) {
+      *out_cluster_id = cluster_id;
+    }
+  }
+  // iterm -> cluster id, populated only for iterms owned by a clustered
+  // instance (cheap: bounded by peak_cluster_pct * total pins). A lookup
+  // miss means background, same as an explicit -1.
+  std::unordered_map<odb::dbITerm*, int> iterm_cluster;
+  auto clusterOf = [&](odb::dbITerm* t) -> int {
+    if (!peak_enabled) {
+      return -1;
+    }
+    const auto it = iterm_cluster.find(t);
+    return it == iterm_cluster.end() ? -1 : it->second;
+  };
+
   for (int i = 0; i < n; ++i) {
     inst_is_seq[i] = isSequentialMaster(insts[i]->getMaster()) ? 1 : 0;
     for (odb::dbITerm* iterm : insts[i]->getITerms()) {
@@ -837,6 +965,9 @@ int formNetsAcyclic(NetlistBuilder& builder,
       const auto io = iterm->getIoType().getValue();
       if (io != odb::dbIoType::INPUT && io != odb::dbIoType::INOUT) {
         continue;
+      }
+      if (peak_enabled && cluster_id[i] >= 0) {
+        iterm_cluster[iterm] = cluster_id[i];
       }
       if (inst_is_seq[i]) {
         seq_pool.push_back(iterm);
@@ -862,9 +993,27 @@ int formNetsAcyclic(NetlistBuilder& builder,
 
   std::uniform_int_distribution<int> pick_fanout(spec.min_fanout,
                                                  spec.max_fanout);
+  // Peak-cluster fanout distribution: same uniform width as the background
+  // range, re-centred on peak_avg_fanout (brief: "same distribution shape ...
+  // applied to the new centre value" — this codebase's shape is a uniform
+  // range, so re-centre that range rather than swapping in a new family).
+  const int fanout_width = spec.max_fanout - spec.min_fanout;
+  int peak_min_fanout = 1;
+  int peak_max_fanout = 1;
+  if (peak_enabled) {
+    peak_min_fanout = std::max(
+        1, static_cast<int>(std::lround(*spec.peak_avg_fanout
+                                        - fanout_width / 2.0)));
+    peak_max_fanout = peak_min_fanout + fanout_width;
+  }
+  std::uniform_int_distribution<int> pick_peak_fanout(peak_min_fanout,
+                                                       peak_max_fanout);
+  std::uniform_real_distribution<double> unit(0.0, 1.0);
+
   int nets_made = 0;
   int loosened = 0;
   int skipped = 0;
+  int cluster_nets_made = 0;
   for (int i = 0;
        i < n && (spec.num_nets < 0 || nets_made < spec.num_nets); ++i) {
     // Retire this instance's still-unused inputs BEFORE forming its net(s):
@@ -879,6 +1028,8 @@ int formNetsAcyclic(NetlistBuilder& builder,
     }
 
     const bool seq_driver = inst_is_seq[i] != 0;
+    const int driver_cluster = peak_enabled ? cluster_id[i] : -1;
+    const bool cluster_net = driver_cluster >= 0;
     for (odb::dbITerm* out : insts[i]->getITerms()) {
       if (spec.num_nets >= 0 && nets_made >= spec.num_nets) {
         break;
@@ -900,30 +1051,67 @@ int formNetsAcyclic(NetlistBuilder& builder,
         }
         continue;
       }
-      const int want = pick_fanout(rng);
+      const int want = cluster_net ? pick_peak_fanout(rng) : pick_fanout(rng);
       const int k = static_cast<int>(
           std::min<size_t>(static_cast<size_t>(want), eligible));
 
       odb::dbNet* net = builder.makeNet("n" + std::to_string(nets_made));
       out->connect(net);
-      for (int s = 0; s < k; ++s) {
-        std::uniform_int_distribution<size_t> pick(0, eligible - 1);
-        size_t r = pick(rng);
-        odb::dbITerm* sink = nullptr;
+      // Peek/take helpers over the flat union of eligible pools (order:
+      // seq_pool, comb_active, comb_retired-if-seq-driver), matching the
+      // background draw exactly; used both for the plain draw and for
+      // rejection-sampling a cluster-preferred draw without mutating state
+      // on a rejected attempt.
+      auto peekEligible = [&](size_t r) -> odb::dbITerm* {
         if (r < seq_pool.size()) {
-          sink = seq_pool[r];
+          return seq_pool[r];
+        }
+        r -= seq_pool.size();
+        if (r < comb_active.size()) {
+          return comb_active[r];
+        }
+        r -= comb_active.size();
+        return comb_retired[r];
+      };
+      auto takeEligible = [&](size_t r) -> odb::dbITerm* {
+        if (r < seq_pool.size()) {
+          odb::dbITerm* t = seq_pool[r];
           seq_pool[r] = seq_pool.back();
           seq_pool.pop_back();
-        } else if (r -= seq_pool.size(); r < comb_active.size()) {
-          sink = takeFromActive(r);
-        } else {
-          r -= comb_active.size();
-          sink = comb_retired[r];
-          comb_retired[r] = comb_retired.back();
-          comb_retired.pop_back();
+          return t;
+        }
+        r -= seq_pool.size();
+        if (r < comb_active.size()) {
+          return takeFromActive(r);
+        }
+        r -= comb_active.size();
+        odb::dbITerm* t = comb_retired[r];
+        comb_retired[r] = comb_retired.back();
+        comb_retired.pop_back();
+        return t;
+      };
+
+      for (int s = 0; s < k; ++s) {
+        std::uniform_int_distribution<size_t> pick(0, eligible - 1);
+        odb::dbITerm* sink = nullptr;
+        if (cluster_net && unit(rng) < kPeakIntraClusterProb) {
+          for (int attempt = 0;
+               attempt < kPeakClusterPickAttempts && sink == nullptr;
+               ++attempt) {
+            const size_t r = pick(rng);
+            if (clusterOf(peekEligible(r)) == driver_cluster) {
+              sink = takeEligible(r);
+            }
+          }
+        }
+        if (sink == nullptr) {
+          sink = takeEligible(pick(rng));
         }
         sink->connect(net);
         --eligible;
+      }
+      if (cluster_net) {
+        ++cluster_nets_made;
       }
       if (k < spec.min_fanout) {
         ++loosened;
@@ -954,8 +1142,12 @@ int formNetsAcyclic(NetlistBuilder& builder,
     debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,
                "formNetsAcyclic: {} nets ({} below min_fanout at the thin "
                "tail of the order, {} drivers skipped with no eligible "
-               "receiver)",
-               nets_made, loosened, skipped);
+               "receiver{})",
+               nets_made, loosened, skipped,
+               peak_enabled
+                   ? ", " + std::to_string(cluster_nets_made)
+                         + " peak-cluster nets"
+                   : "");
   }
   return nets_made;
 }
@@ -985,7 +1177,8 @@ int generateLegacy(NetlistBuilder& builder, const SyntheticNetlistSpec& spec,
 // Statistical-mix generation (Stage B): per-instance sequential/combinational
 // roll, then a bucket roll, then a uniform pick among the bucket's masters.
 int generateStatistical(NetlistBuilder& builder,
-                        const SyntheticNetlistSpec& spec, std::mt19937& rng)
+                        const SyntheticNetlistSpec& spec, std::mt19937& rng,
+                        std::vector<int>* out_cluster_id)
 {
   utl::Logger* logger = builder.logger();
   GenPlan plan;
@@ -1031,7 +1224,8 @@ int generateStatistical(NetlistBuilder& builder,
 
   // Stage D: ordered, acyclic-by-construction net formation (the legacy path
   // keeps the original shuffled-pool formNets).
-  const int nets_made = formNetsAcyclic(builder, insts, spec, rng);
+  const int nets_made =
+      formNetsAcyclic(builder, insts, spec, rng, out_cluster_id);
 
   // Post-generation empirical check: logged warning only, never a failure.
   const double tol = spec.distribution_tolerance_pct;
@@ -1092,7 +1286,8 @@ int generateStatistical(NetlistBuilder& builder,
 }  // namespace
 
 int generateSynthetic(NetlistBuilder& builder,
-                      const SyntheticNetlistSpec& spec)
+                      const SyntheticNetlistSpec& spec,
+                      std::vector<int>* out_cluster_id)
 {
   utl::Logger* logger = builder.logger();
   const bool stat = spec.usesStatisticalMix();
@@ -1132,7 +1327,7 @@ int generateSynthetic(NetlistBuilder& builder,
     }
     nets = generateLegacy(builder, spec, rng);
   } else {
-    nets = generateStatistical(builder, spec, rng);
+    nets = generateStatistical(builder, spec, rng, out_cluster_id);
   }
   if (logger != nullptr && nets >= 0) {
     debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,

@@ -22,6 +22,15 @@ ports. The legacy weighted mix keeps the original shuffled-pool `formNets`
 and makes no acyclicity guarantee. Primary I/O ports and a Verilog writer
 are **Stage E**.
 
+**Peak fanout sub-clusters** (optional, layered on Stage D — see its own
+section below): `assignPeakClusters` groups a subset of instances into
+`num_peak_clusters` clusters once per generation; `formNetsAcyclic`'s net
+formation then biases receiver selection toward the driver's own cluster
+for a fixed fraction of sink slots, but **only ever within the pools Stage D
+already treats as eligible** — so cluster preference can bias *which*
+eligible receiver is picked, never make an ineligible one eligible, and the
+DAG/loop-freedom guarantee above is completely unaffected.
+
 ## `netlistgen.h` — API surface
 
 Declares the two layers, the spec structs, and the shared statistical-mix
@@ -245,6 +254,10 @@ README.md: a net whose eligible pool cannot cover `min_fanout` is loosened
 receivers is skipped entirely (no net — never a sinkless net, never a
 stall).
 
+If `spec.peak_avg_fanout` is set, `assignPeakClusters` runs once up front
+(see its own diagram below) and the per-net logic gains one more branch —
+covered separately below so this diagram stays the un-clustered baseline.
+
 ```mermaid
 graph TD
   fill["for each inst i, for each iterm:<br/>skip POWER/GROUND + non-INPUT/INOUT<br/>seq inst -> seq_pool<br/>comb inst -> comb_active (+active_pos)"] --> loop{"i = 0..n-1, net cap not hit?"}
@@ -264,6 +277,56 @@ graph TD
   skipd --> loop
   next --> loop
 ```
+
+## `netlistgen.cpp` — peak fanout sub-clusters (optional, layered on Stage D)
+
+`assignPeakClusters` (exposed for testing) runs once, at the very top of
+`formNetsAcyclic`, only if `spec.peak_avg_fanout` is set — it consumes the
+shared `rng` exactly once (a single shuffle), so it does not perturb
+generation determinism when the feature is unused. Its result is pure
+bookkeeping (`cluster_id`, index-aligned with creation order): never
+attached to the `dbBlock`/`Hypergraph`, only optionally copied out through
+`generateSynthetic`'s `out_cluster_id` parameter for tests.
+
+```mermaid
+graph TD
+  chk{"spec.peak_avg_fanout set?"} -->|no| skip["cluster_id stays empty;<br/>driver_cluster always -1 (no behavior change)"]
+  chk -->|yes| shuf["order = shuffle([0, n), rng)<br/>(one rng consumption)"]
+  shuf --> size["cluster_size = floor(peak_cluster_pct * n / num_peak_clusters)"]
+  size --> slice["for k in 0..num_peak_clusters-1:<br/>cluster_id[order[k*cluster_size .. (k+1)*cluster_size-1]] = k<br/>rest = -1 (background)"]
+  slice --> out["optional: copy into out_cluster_id (tests only)"]
+```
+
+When a driver's instance has `cluster_id[i] >= 0`, `formNetsAcyclic`'s per-net
+logic (from the baseline diagram above) gains this extra branch in place of
+the plain "want = pick_fanout(rng)" / "uniform index into pool union" steps:
+
+```mermaid
+graph TD
+  netstart["driver_cluster = cluster_id[i]<br/>cluster_net = driver_cluster >= 0"] --> fanout{"cluster_net?"}
+  fanout -->|no| bgfanout["want = pick_fanout(rng)<br/>(background range, unchanged)"]
+  fanout -->|yes| pkfanout["want = pick_peak_fanout(rng)<br/>(same width, re-centred on peak_avg_fanout)"]
+  bgfanout --> perslot
+  pkfanout --> perslot["per sink slot s in 0..k-1"]
+  perslot --> intra{"cluster_net AND<br/>unit(rng) < p_intra (0.8)?"}
+  intra -->|no| plain["takeEligible(uniform index into<br/>seq_pool+comb_active(+comb_retired if seq driver))"]
+  intra -->|yes| reject["up to kPeakClusterPickAttempts:<br/>peek a uniform eligible index r;<br/>clusterOf(peekEligible(r)) == driver_cluster?"]
+  reject -->|hit| take["takeEligible(r)"]
+  reject -->|cap exhausted, no hit| plain
+  take --> connect["sink.connect(net); --eligible"]
+  plain --> connect
+```
+
+Rejection sampling never mutates pool state on a miss (`peekEligible` reads
+without removing), so a failed cluster-preferred attempt costs one extra
+`rng` draw and nothing else; the eventual accepted pick (cluster-hit or
+background fallback) is the only one that calls `takeEligible` and removes
+from the pool. This is why cluster preference can never violate Stage D's
+DAG invariant: it only ever chooses **among** the pools `formNetsAcyclic`
+already computed as eligible for this specific driver — the eligibility
+computation itself (`seq_pool` / `comb_active` / `comb_retired`,
+`takeFromActive`, the retirement step) is completely unmodified by
+clustering.
 
 ## Engine-level flow: spec → block → hypergraph
 

@@ -19,6 +19,12 @@ topology, then feed them to `Hypergraph::buildFromBlock()`.
 > - **Stage E** — primary I/O ports and a Verilog writer (and relaxation of
 >   the `sequential_ratio > 0` requirement below).
 >
+> **Peak fanout sub-clusters** (`docs/briefs/
+> spike-netlistgen-peak-fanout-clusters.md`) landed on top of Stage D:
+> optional, additive-only congestion-hot-spot generation for validating
+> downstream metrics tooling (`hg_metrics`, not yet implemented in this
+> repo) — see "Peak fanout sub-clusters" below.
+>
 > See `FLOW.md` for algorithmic flow diagrams.
 
 ## What the engine does
@@ -124,6 +130,85 @@ LEF-backed manual config produced 1007 nets with every fanout in [2, 5] and
 mean 3.55, where unconstrained pairing had run the sink pool to exhaustion),
 a possible handful of **below-`min_fanout` tail nets** at small scale, and
 correspondingly **more input pins left unconnected**.
+
+## Peak fanout sub-clusters
+
+Optional congestion-hot-spot generation, layered on top of the statistical
+mix and Stage D's acyclic net formation (`docs/briefs/
+spike-netlistgen-peak-fanout-clusters.md`): a subset of instances is grouped
+into `num_peak_clusters` clusters whose intra-cluster nets are driven at a
+higher fanout than the background, giving localized dense subgraphs with
+known structural properties as ground truth for downstream congestion/timing
+detectors (`hg_metrics`, not yet implemented in this repo).
+
+**JSON / spec fields** (all optional; absent entirely ⇒ generation identical
+to before this feature):
+
+| Field | Maps to | Rule |
+|-------|---------|------|
+| `peak_avg_fanout` | `spec.peak_avg_fanout` | Engages the feature. Must be `>` the background average fanout `(min_fanout + max_fanout) / 2` — this codebase has no literal "average fanout" scalar (the background range is `[min_fanout, max_fanout]`), so the range midpoint is the closest analog and what a "hot spot" must exceed. |
+| `peak_cluster_pct` | `spec.peak_cluster_pct` | Fraction of instances assigned to peak clusters, split evenly. Must be in `(0, 1)` if set; defaults to `0.10` if unset. **Ignored** (no validation, no effect) if `peak_avg_fanout` is absent. |
+| `num_peak_clusters` | `spec.num_peak_clusters` | Number of clusters. Must be `>= 1` if set; defaults to `1`. Ignored if `peak_avg_fanout` is absent. |
+
+**Requires the statistical mix.** `peak_avg_fanout` set while the spec is
+otherwise legacy weighted-mix is a **validation error**, not a silent no-op:
+the legacy path has no per-instance sequential/combinational classification
+to build cluster-safe eligibility from (see below).
+
+**Cluster assignment** (`assignPeakClusters`, exposed for testing): runs once
+per generation, consuming the shared seeded RNG exactly once (a single
+`std::shuffle` over `[0, num_insts)`), so it stays reproducible for a given
+`(spec, seed)` alongside the rest of generation. `cluster_size =
+floor(peak_cluster_pct * num_insts / num_peak_clusters)`; the first
+`cluster_size` shuffled indices become cluster 0, the next `cluster_size`
+become cluster 1, and so on; everything else is background (`-1`).
+**Cluster membership is a local bookkeeping vector, never attached to the
+dbBlock/Hypergraph model** — `generateSynthetic` exposes it only through an
+optional trailing `out_cluster_id` out-parameter (`nullptr` by default, so
+every existing call site is unaffected) purely so tests can observe it.
+
+**Cluster-aware net formation**, inside `formNetsAcyclic`: for a net driven
+from an instance in cluster `c`,
+- the receiver **count** is drawn from a distribution centred on
+  `peak_avg_fanout` instead of the background range — same uniform *shape*
+  and *width* as `[min_fanout, max_fanout]`, just re-centred (this codebase's
+  fanout sampling is a uniform range rather than a Poisson/log-normal
+  family, so "same distribution shape, new centre" means re-centring that
+  same range);
+- each receiver slot is filled from cluster `c` with probability `p_intra =
+  0.8` (an internal constant, not exposed in the config) via **rejection
+  sampling over the pools Stage D already treats as eligible** — draw a
+  uniformly random eligible receiver, accept it if it belongs to cluster
+  `c`, otherwise redraw (capped at a fixed attempt count) — else (or on the
+  remaining `1 - p_intra` of slots) an ordinary uniform draw over the full
+  eligible pool, exactly as before clustering existed.
+
+**This is the one deliberate deviation from a literal reading of the spike
+brief**, and it is load-bearing: the brief's own pseudocode picks "a random
+cell from cluster `c`" with no eligibility filter, and separately assumes
+Stage D is a post-hoc "DAG topological sort + cycle breaking" pass that
+would clean up any cycles clustering introduces. Neither matches this
+engine — Stage D **prevents** cycles by restricting which receivers are
+eligible **during** formation (`formNetsAcyclic`'s `seq_pool` /
+`comb_active` / `comb_retired`), there is no separate repair pass to fall
+back on, and cluster membership (built from an arbitrary shuffle) is
+uncorrelated with creation order, so drawing from a cluster **without**
+respecting eligibility would reintroduce exactly the combinational cycles
+Stage D exists to rule out. Restricting cluster preference to already-
+eligible receivers keeps the brief's intent (a tunable, measurable
+fanout-favoring bias toward same-cluster cells) while leaving Stage D
+completely untouched, as the brief separately requires. One consequence:
+for a combinational driver late in the creation order — where Stage D's
+eligible pool is already thin (see "Combinational-loop avoidance" above) —
+the effective intra-cluster hit rate can fall below the nominal 80% (the
+rejection-sampling cap degrades gracefully to a background pick, per the
+brief's own documented edge case, generalized from "cluster has fewer
+cells" to "cluster has fewer **eligible** cells").
+
+**Edge case (brief's own wording, satisfied by construction):** if cluster
+`c` has fewer eligible cells than the requested fanout, the fallback to a
+background pick is automatic and never produces a duplicate sink or a
+stalled draw — the same swap-remove pool mechanics Stage D already uses.
 
 ## Statistical cell-mix contract
 
@@ -276,6 +361,9 @@ never into the `netlistgen` library). The schema is a serialization of
 | `combinational_pin_distribution` | `spec.combinational_pin_distribution` | Object keyed `"2","3","4","5","6+"`, sum 100. Mode A. |
 | `target_avg_fanout` | `spec.target_avg_fanout` | Mode B (mutually exclusive with the distribution). |
 | `distribution_tolerance_pct` | `spec.distribution_tolerance_pct` | Optional (default 2.0). |
+| `peak_avg_fanout` | `spec.peak_avg_fanout` | Optional; engages peak fanout sub-clusters (see below). Must be `>` `(min_fanout + max_fanout) / 2`. |
+| `peak_cluster_pct` | `spec.peak_cluster_pct` | Optional, `(0, 1)`; defaults to `0.10`. Ignored if `peak_avg_fanout` absent. |
+| `num_peak_clusters` | `spec.num_peak_clusters` | Optional, `>= 1`; defaults to `1`. Ignored if `peak_avg_fanout` absent. |
 | `output_def_path` | CLI-only | Write DEF here if set. |
 | `output_odb_path` | CLI-only | Write `.odb` here if set. |
 
@@ -371,7 +459,11 @@ until it calls `setDebugLevel` (or `eda::applyVerbosity`) on the shared logger.
 Standalone in-memory library: **no hypergraph attribute planes** read or
 written. Input is a `SyntheticNetlistSpec`; output is a populated `dbBlock`
 owned by the `NetlistBuilder`, plus the net count (or `-1` on invalid spec).
-Consumed downstream by `Hypergraph::buildFromBlock()`.
+Consumed downstream by `Hypergraph::buildFromBlock()`. `generateSynthetic`
+also takes an optional trailing `std::vector<int>* out_cluster_id = nullptr`
+— when non-null and peak fanout sub-clusters are engaged, it is filled with
+per-instance cluster membership; this is generation-time bookkeeping for
+tests only and is never itself part of the `dbBlock`/`Hypergraph` model.
 
 ## Control parameters (`SyntheticNetlistSpec`)
 
@@ -388,6 +480,9 @@ Consumed downstream by `Hypergraph::buildFromBlock()`.
 | `combinational_pin_distribution` | `std::optional<array<double,5>>` | unset | Mode A percentages `[2,3,4,5,6+]`, sum 100. |
 | `target_avg_fanout` | `std::optional<double>` | unset | Mode B target mean fanout (signal pins minus the driver, `#pins−1`); synthetic range `(1, 6]` (upper bound inclusive). |
 | `distribution_tolerance_pct` | `double` | `2.0` | Post-gen deviation warning threshold. |
+| `peak_avg_fanout` | `std::optional<double>` | unset | Engages peak fanout sub-clusters; target mean fanout for intra-cluster nets. Must be `>` `(min_fanout + max_fanout) / 2`. Requires the statistical mix. |
+| `peak_cluster_pct` | `std::optional<double>` | unset (→ `0.10` when engaged) | Fraction of instances in peak clusters. Must be in `(0, 1)` if set. Ignored if `peak_avg_fanout` unset. |
+| `num_peak_clusters` | `std::optional<int>` | unset (→ `1` when engaged) | Number of peak clusters. Must be `>= 1` if set. Ignored if `peak_avg_fanout` unset. |
 
 `MasterSpec`: `name`, `num_inputs` (2), `num_outputs` (1), `weight` (1.0).
 
@@ -454,8 +549,8 @@ if (eda::validateNetlist(nb.block()).ok) {     // structural well-formedness
 ```bash
 cmake -B build
 cmake --build build --target netlistgen_test netlistgen_stageb_test \
-      netlistgen_stagec_test netlistgen_staged_test netlistgen_link_smoke \
-      netlistgen_cli
+      netlistgen_stagec_test netlistgen_staged_test netlistgen_peak_cluster_test \
+      netlistgen_link_smoke netlistgen_cli
 ctest --test-dir build -R "netlistgen" --output-on-failure
 ```
 
@@ -489,6 +584,17 @@ ctest --test-dir build -R "netlistgen" --output-on-failure
   exemption); the thin-pool bootstrap edge case (loosened/skipped tail,
   never a sinkless net, bit-identical on rerun); and a CLI spawn whose DEF
   output round-trips through `defin` loop-free.
+- `test/netlistgen_peak_cluster_test.cpp` — peak fanout sub-clusters (no data
+  files needed): no-peak-params leaves `out_cluster_id` empty; basic
+  single-cluster generation (correct instance/cluster counts, Stage D DAG
+  still valid, cluster-driven net average fanout measurably above the global
+  average and within 20% of `peak_avg_fanout`); `assignPeakClusters` directly
+  (multi-cluster sizing within ±1, determinism for a fixed seed) and threaded
+  through `generateSynthetic` for `num_peak_clusters=3`; all four validation
+  failures (below-background target, out-of-range `peak_cluster_pct`,
+  `num_peak_clusters=0`, legacy-mix rejection) plus the "ignored when
+  `peak_avg_fanout` absent" rule; and the `num_peak_clusters`/`peak_cluster_pct`
+  defaults.
 - `test/netlistgen_link_smoke.cpp` — library-linkage guard.
 
 Scale reference: ~500k insts / ~1.4M pins generate in about 2 s (synthetic).
@@ -503,3 +609,10 @@ Scale reference: ~500k insts / ~1.4M pins generate in about 2 s (synthetic).
   `primary_input_count` > 0".
 - Custom prior distribution for Mode B's max-entropy tilt (currently uniform).
 - YAML config support alongside JSON.
+- Peak fanout sub-clusters: no LEF-mode-specific test coverage yet (the
+  mechanism is LEF-agnostic — it only touches `dbITerm`/`dbInst`, not master
+  origin — but the test suite currently only exercises synthetic mode); no
+  inter-cluster bias (clusters never preferentially wire to each other, only
+  to their own members or the shared background); `hg_metrics` itself (the
+  downstream consumer this feature exists for) is not yet implemented in
+  this repo.

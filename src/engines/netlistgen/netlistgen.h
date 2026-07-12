@@ -43,6 +43,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -212,6 +213,33 @@ struct SyntheticNetlistSpec
   // never a generation failure.
   double distribution_tolerance_pct = 2.0;
 
+  // ---- Peak fanout sub-clusters (optional; congestion hot-spot generation) ----
+  // A subset of instances is grouped into num_peak_clusters clusters whose
+  // intra-cluster nets are driven at a higher fanout (peak_avg_fanout) than
+  // the background [min_fanout, max_fanout]. Layered on top of Stage D's
+  // formNetsAcyclic: cluster-preferred sink selection only ever draws from
+  // Stage D's already-eligible receiver pools, so the DAG/loop-freedom
+  // guarantee is completely unaffected — a cluster can only bias WHICH
+  // eligible receiver is picked, never make an ineligible one eligible.
+  // Requires the statistical mix to be engaged (fails validation otherwise:
+  // the legacy weighted-mix path has no per-instance sequential/combinational
+  // classification to build cluster-safe eligibility from). Cluster
+  // membership is a local bookkeeping vector inside generation, never
+  // recorded on the dbBlock/Hypergraph.
+  //
+  // Target mean fanout (load pins, driver excluded) for nets driven from
+  // inside a peak cluster. Engages the feature when set. Must be strictly
+  // greater than the background average fanout (min_fanout + max_fanout)/2.
+  std::optional<double> peak_avg_fanout;
+  // Fraction of instances assigned to peak clusters (split evenly across
+  // num_peak_clusters). Must be in (0, 1), exclusive both ends. Defaults to
+  // 0.10 when peak_avg_fanout is set but this is not. Ignored (no
+  // validation, no effect) when peak_avg_fanout is unset.
+  std::optional<double> peak_cluster_pct;
+  // Number of peak clusters. Must be >= 1. Defaults to 1. Ignored when
+  // peak_avg_fanout is unset.
+  std::optional<int> num_peak_clusters;
+
   // True when the statistical mix should drive generation.
   bool usesStatisticalMix() const
   {
@@ -225,8 +253,16 @@ struct SyntheticNetlistSpec
 // and nets n0..n{k-1}. Deterministic for a given (spec, seed). Returns the
 // number of nets created, or -1 if the spec fails validation (bad config,
 // or a requested bucket/class with no matching masters in a loaded LEF).
+// If `out_cluster_id` is non-null and the spec engages peak fanout
+// sub-clusters (statistical mix + peak_avg_fanout set), it is resized to
+// num_insts and filled with each instance's cluster id, index-aligned with
+// creation order (u<i>); -1 means background. Left untouched otherwise
+// (legacy mix, invalid spec, or no peak_avg_fanout). Exposed purely so
+// tests can verify cluster-biased fanout without adding cluster membership
+// to the persistent dbBlock/Hypergraph data model.
 int generateSynthetic(NetlistBuilder& builder,
-                      const SyntheticNetlistSpec& spec);
+                      const SyntheticNetlistSpec& spec,
+                      std::vector<int>* out_cluster_id = nullptr);
 
 // ---- Shared statistical-mix helpers (exposed for testing) ----
 
@@ -271,5 +307,18 @@ bool validateSpecConfig(const SyntheticNetlistSpec& spec, utl::Logger* logger);
 std::array<double, kNumCombBuckets> maxEntropyDistribution(
     const std::array<double, kNumCombBuckets>& anchors,
     double target_mean);
+
+// Peak-fanout sub-cluster assignment: shuffles [0, num_insts) with `rng`
+// (consuming it exactly once) and slices off num_peak_clusters contiguous
+// chunks of floor(peak_cluster_pct * num_insts / num_peak_clusters)
+// instances each, assigned cluster ids 0..num_peak_clusters-1 in order;
+// every other instance gets -1 (background). Pure bookkeeping — the result
+// is never attached to the dbBlock/Hypergraph model, only consumed
+// in-memory by formNetsAcyclic's cluster-preferred sink selection. Exposed
+// for direct unit testing of cluster-size / determinism properties.
+std::vector<int> assignPeakClusters(int num_insts,
+                                    double peak_cluster_pct,
+                                    int num_peak_clusters,
+                                    std::mt19937& rng);
 
 }  // namespace eda

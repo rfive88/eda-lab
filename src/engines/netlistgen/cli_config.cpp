@@ -134,6 +134,19 @@ bool parseCliConfig(const std::string& json_text,
       spec.combinational_pin_distribution = dist;
     }
 
+    // ---- Peak fanout sub-clusters (optional; see netlistgen.h) ----
+    if (j.contains("peak_avg_fanout") && !j.at("peak_avg_fanout").is_null()) {
+      spec.peak_avg_fanout = j.at("peak_avg_fanout").get<double>();
+    }
+    if (j.contains("peak_cluster_pct")
+        && !j.at("peak_cluster_pct").is_null()) {
+      spec.peak_cluster_pct = j.at("peak_cluster_pct").get<double>();
+    }
+    if (j.contains("num_peak_clusters")
+        && !j.at("num_peak_clusters").is_null()) {
+      spec.num_peak_clusters = j.at("num_peak_clusters").get<int>();
+    }
+
     // ---- CLI-only I/O fields ----
     if (j.contains("output_def_path") && !j.at("output_def_path").is_null()) {
       out.output_def_path = j.at("output_def_path").get<std::string>();

@@ -362,12 +362,20 @@ completing Phase 1. Verilog writer + primary I/O ports are Stage E — see
   `sequential_ratio > 0` (fail-fast) until Stage E adds primary inputs. The
   legacy weighted `masters` mix keeps unconstrained shuffled-pool pairing
   (no acyclicity guarantee). Scale: ~500k insts / ~1.4M pins in about 2s.
+  Optional peak fanout sub-clusters (congestion hot-spots for validating
+  downstream metrics tooling) layer on top: `assignPeakClusters` groups a
+  subset of instances into clusters once per run, and cluster-driven nets
+  bias receiver selection toward same-cluster cells — strictly *within* the
+  pools Stage D already computed as eligible, so the DAG guarantee is
+  untouched. Requires the statistical mix (`peak_avg_fanout` set on a
+  legacy-mix spec fails validation).
 
 Tests: `test/netlistgen_test.cpp` (Stage A, no data files),
 `netlistgen_stageb_test.cpp` (statistical mix / LEF classification),
 `netlistgen_stagec_test.cpp` (writers, validation, CLI),
 `netlistgen_staged_test.cpp` (loop freedom, bootstrap fail-fast, thin-pool
-behavior, CLI DEF round-trip cycle check).
+behavior, CLI DEF round-trip cycle check),
+`netlistgen_peak_cluster_test.cpp` (peak fanout sub-clusters).
 
 ## Partitioning engine (Stages 1–2)
 

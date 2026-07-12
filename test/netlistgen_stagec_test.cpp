@@ -3,8 +3,9 @@
 // (including its validate-before-write fail-fast). Needs EDA_LAB_DATA_DIR
 // (Nangate45 LEF fixtures) and NETLISTGEN_CLI_BIN (the built CLI binary path).
 //
-// CAVEAT: combinational-loop avoidance is Stage D — generated output is
-// well-formed but not yet guaranteed loop-free.
+// Stage D landed loop-free net formation, which made sequential_ratio > 0
+// mandatory in statistical mode — every generating spec here sets it.
+// Loop-freedom itself is asserted in test/netlistgen_staged_test.cpp.
 
 #include <array>
 #include <cstdio>
@@ -47,15 +48,15 @@ std::string tmpPath(const std::string& name)
 }
 
 // A LEF-backed spec matching the CLI smoke-test config (all five combinational
-// buckets populated by Nangate45; sequential_ratio 0 keeps this run purely
-// combinational — sequential detection is covered in the stage B tests).
+// buckets populated by Nangate45; sequential_ratio must be > 0 since Stage D —
+// deeper sequential-classification checks live in the stage B tests).
 SyntheticNetlistSpec smokeSpec()
 {
   SyntheticNetlistSpec spec;
   spec.tech_lef_path = techLef();
   spec.cell_lef_paths = {stdcellLef()};
   spec.num_insts = 300;
-  spec.sequential_ratio = 0.0;
+  spec.sequential_ratio = 0.1;
   spec.combinational_pin_distribution = std::array<double, 5>{20, 20, 20, 20, 20};
   spec.min_fanout = 2;
   spec.max_fanout = 5;
@@ -72,6 +73,7 @@ TEST(ValidationTest, PassesOnSyntheticGeneration)
   NetlistBuilder nb("synthval");
   SyntheticNetlistSpec spec;
   spec.num_insts = 2000;
+  spec.sequential_ratio = 0.1;
   spec.combinational_pin_distribution = std::array<double, 5>{30, 25, 20, 15, 10};
   spec.min_fanout = 2;
   spec.max_fanout = 5;
@@ -155,6 +157,7 @@ TEST(WriterTest, WritesDefAndOdbFiles)
   NetlistBuilder nb("writers");
   SyntheticNetlistSpec spec;
   spec.num_insts = 100;
+  spec.sequential_ratio = 0.1;
   spec.combinational_pin_distribution = std::array<double, 5>{20, 20, 20, 20, 20};
   ASSERT_GT(generateSynthetic(nb, spec), 0);
   nb.estimateDieArea(spec.num_insts);
@@ -350,7 +353,7 @@ TEST(CliSmokeTest, GeneratesWritesAndRoundTrips)
         << "  \"fanout_range\": { \"min\": 2, \"max\": 5 },\n"
         << "  \"tech_lef_path\": \"" << techLef() << "\",\n"
         << "  \"cell_lef_paths\": [\"" << stdcellLef() << "\"],\n"
-        << "  \"sequential_ratio\": 0.0,\n"
+        << "  \"sequential_ratio\": 0.1,\n"
         << "  \"combinational_pin_distribution\": "
            "{\"2\":20,\"3\":20,\"4\":20,\"5\":20,\"6+\":20},\n"
         << "  \"output_def_path\": \"" << def << "\",\n"

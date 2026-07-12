@@ -7,7 +7,7 @@ GTest suites for eda-lab.
 ```bash
 cmake -B build              # Debug tree; build-release/ is the Release tree
 cmake --build build
-ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_stageb_test|netlistgen_stagec_test|netlistgen_link_smoke|fm_partitioner_test|cli_help_test" --output-on-failure
+ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_stageb_test|netlistgen_stagec_test|netlistgen_staged_test|netlistgen_link_smoke|fm_partitioner_test|cli_help_test|error_handling_test" --output-on-failure
 ```
 
 The `-R` filter matters: a bare `ctest` also picks up the vendored OpenROAD
@@ -66,9 +66,21 @@ cd run
   output path, malformed JSON); the CLI's validate-before-write fail-fast on a
   malformed block (nothing written); and a CLI smoke test that spawns the
   binary, reads the DEF back through `defin`, and confirms instance/net counts.
-  **Caveat:** this proves output is structurally well-formed, *not* that it is
-  combinational-loop-free — that guarantee is Stage D. `netlistgen` is not yet
-  "fully promoted / ready for Stage 3" until Stage D lands.
+  (Well-formedness is a distinct guarantee from loop-freedom — the latter is
+  Stage D's, covered by `netlistgen_staged_test.cpp`.)
+- `netlistgen_staged_test.cpp` — Stage D of the same engine: combinational-
+  loop freedom of the statistical net formation. Needs `EDA_LAB_DATA_DIR`
+  and `NETLISTGEN_CLI_BIN`. Covers: cycle-detector sanity on a hand-built
+  two-inverter loop (must flag) and a register feedback loop (must not);
+  DFS cycle detection — sequential instances cut at the D/Q boundary — over
+  synthetic runs at 300/5000/50000 instances x 3 seeds and LEF-backed runs
+  x 2 seeds, plus the stronger construction invariant that every comb->comb
+  edge follows instance creation order, and `Hypergraph::buildFromBlock` on
+  the acyclic block; the `sequential_ratio > 0` bootstrap fail-fast (zero,
+  unset, just-above-zero passes, legacy-mode exemption); the thin-pool edge
+  case (loosened receiver counts / skipped tail drivers, never a sinkless
+  net, deterministic on rerun); and a spawned-CLI DEF round-trip confirmed
+  loop-free.
 - `netlistgen_link_smoke.cpp` — library-linkage guard for the same engine,
   no data files needed. A plain `main()` (no GTest) that links the
   `netlistgen` library as an external consumer would

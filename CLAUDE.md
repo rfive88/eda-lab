@@ -257,8 +257,8 @@ an abort/segfault.
 - `src/hypergraph/` — hypergraph netlist model (see below).
 - `src/support/ord_shim.cpp` — inert `ord::getLogger`/`ord::OpenRoad::openRoad`
   definitions so links survive when utl.a's Tcl-wrapper objects get pulled in.
-- `src/engines/netlistgen/` — programmatic netlist construction, no LEF/DEF
-  (see below).
+- `src/engines/netlistgen/` — programmatic netlist construction, synthetic
+  or LEF-backed, with DEF/`.odb` output (see below).
 - `src/engines/partitioning/` — Stage 1 partitioning engine (see below).
 - `test/` — GTest suites; `EDA_LAB_DATA_DIR` points at `data/`.
 - `data/` — Nangate45 LEF + `gcd_nangate45.def` test design.
@@ -334,33 +334,40 @@ never cache a plane reference across a rebuild.
 ## Programmatic netlist construction (netlistgen)
 
 `src/engines/netlistgen/netlistgen.h` builds `dbBlock`s through OpenDB API
-calls only — no LEF/DEF — so tests and benchmarks can create netlists of any
-size with exactly known or statistically controlled topology, then feed them
-to `Hypergraph::buildFromBlock()`. It is being promoted from a Stage 1/2 test
-utility into a full engine (Stage A of 5 relocated it here and made pin
-access IoType-based; LEF-backed masters, statistical cell mix, loop
-avoidance, and DEF/`.odb`/Verilog writers land in later stages — see
-`src/engines/netlistgen/README.md`). Two layers:
+calls — optionally backed by real LEF cells — so tests and benchmarks can
+create netlists of any size with exactly known or statistically controlled
+topology, then feed them to `Hypergraph::buildFromBlock()`. Promoted from a
+Stage 1/2 test utility into a full engine: Stage A relocated it here and
+made pin access IoType-based; Stage B added LEF-backed masters and the
+statistical cell mix; Stage C added DEF/`.odb` writers, net well-formedness
+validation, and the JSON-driven `netlistgen_cli`; Stage D made
+statistical-mix net formation combinational-loop-free by construction,
+completing Phase 1. Verilog writer + primary I/O ports are Stage E — see
+`src/engines/netlistgen/README.md`. Two core layers:
 
 - **`NetlistBuilder`** owns a fresh `dbDatabase` (tech, lib, chip, top block)
   and wraps master/inst/net creation and pin connection. It handles OpenDB's
   master-freeze protocol (`dbMTerm::create` all pins, then `setFrozen()`,
-  required before `dbInst::create`). Masters are connectivity-only (no
-  geometry) with pins named `i0..iN-1` / `o0..oM-1`.
+  required before `dbInst::create`). Synthetic masters are connectivity-only
+  (no geometry) with pins named `i0..iN-1` / `o0..oM-1`; `loadLef()` loads a
+  real tech + cell library instead.
 - **`generateSynthetic(builder, spec)`** populates the block from a
-  `SyntheticNetlistSpec`: weighted cell mix (`MasterSpec` name/inputs/outputs/
-  weight), instance count, optional net count, and a fanout range
-  `[min_fanout, max_fanout]` (load pins per net, driver excluded). Seeded
-  `std::mt19937` makes a given (spec, seed) reproducible. Each net takes one
-  unused output pin (driver) and `fanout` unused input pins from shuffled
-  pools, so every iterm lands on at most one net — always a valid netlist.
-  Generation stops when the requested net count is reached or a pin pool
-  drains. Scale: ~500k insts / ~1.4M pins generate in about 2s.
+  `SyntheticNetlistSpec`. Seeded `std::mt19937` makes a given (spec, seed)
+  reproducible; fanout = load pins per net, driver excluded, drawn from
+  `[min_fanout, max_fanout]`; every iterm lands on at most one net.
+  Statistical mode (sequential/combinational ratio + pin-count-bucket mix)
+  forms nets in instance-creation order with receiver-eligibility filtering
+  so combinational cycles are impossible by construction (a comb output only
+  drives sequential inputs or later-created comb instances); this requires
+  `sequential_ratio > 0` (fail-fast) until Stage E adds primary inputs. The
+  legacy weighted `masters` mix keeps unconstrained shuffled-pool pairing
+  (no acyclicity guarantee). Scale: ~500k insts / ~1.4M pins in about 2s.
 
-Tests (`test/netlistgen_test.cpp`, no data files needed): a hand-built
-3-inst/2-net case asserting exact hypergraph CSR contents, spec conformance
-(fanout bounds, counts, pin uniqueness) on a 2000-inst netlist, net-count
-limiting, and seed determinism.
+Tests: `test/netlistgen_test.cpp` (Stage A, no data files),
+`netlistgen_stageb_test.cpp` (statistical mix / LEF classification),
+`netlistgen_stagec_test.cpp` (writers, validation, CLI),
+`netlistgen_staged_test.cpp` (loop freedom, bootstrap fail-fast, thin-pool
+behavior, CLI DEF round-trip cycle check).
 
 ## Partitioning engine (Stages 1–2)
 

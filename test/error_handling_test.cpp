@@ -140,8 +140,9 @@ TEST(ErrorHandling, MissingOutputDirectoryIsCreated)
   const std::filesystem::path out_dir = tempPath("made_dir_xyz") / "nested";
   std::filesystem::remove_all(tempPath("made_dir_xyz"));
   const std::string out = (out_dir / "out.def").string();
-  const std::string cfg = "{\"instance_count\": 200, \"target_avg_fanout\": "
-                          "3.0, \"output_def_path\": \""
+  const std::string cfg = "{\"instance_count\": 200, \"sequential_ratio\": "
+                          "0.2, \"target_avg_fanout\": 3.0, "
+                          "\"output_def_path\": \""
                           + out + "\"}";
   const std::string path = writeTempFile("made_outdir.json", cfg);
   std::ostringstream err;
@@ -160,8 +161,9 @@ TEST(ErrorHandling, UncreatableOutputDirectoryReturnsNonzero)
   const std::string blocker = writeTempFile("blocker_file", "x");
   const std::string bad_out = (std::filesystem::path(blocker) / "sub" / "out.def")
                                   .string();
-  const std::string cfg = "{\"instance_count\": 200, \"target_avg_fanout\": "
-                          "3.0, \"output_def_path\": \""
+  const std::string cfg = "{\"instance_count\": 200, \"sequential_ratio\": "
+                          "0.2, \"target_avg_fanout\": 3.0, "
+                          "\"output_def_path\": \""
                           + bad_out + "\"}";
   const std::string path = writeTempFile("uncreatable_outdir.json", cfg);
   std::ostringstream err;
@@ -211,7 +213,8 @@ TEST(ErrorHandling, NetlistgenNonexistentLefExitsCleanly)
   const std::string out_odb = tempPath("nlgen_out.odb").string();
   const std::string cfg =
       "{\"instance_count\": 10, \"tech_lef_path\": \"/no/such/tech.lef\", "
-      "\"target_avg_fanout\": 3.0, \"output_odb_path\": \"" + out_odb + "\"}";
+      "\"sequential_ratio\": 0.2, \"target_avg_fanout\": 3.0, "
+      "\"output_odb_path\": \"" + out_odb + "\"}";
   const std::string path = writeTempFile("nlgen_badlef.json", cfg);
   const RunResult r = runProcess({NETLISTGEN_CLI_BIN, path});
   EXPECT_TRUE(r.exited_normally) << "process crashed (signal) instead of "
@@ -229,8 +232,8 @@ TEST(ErrorHandling, NetlistgenMalformedLefExitsCleanly)
   const std::string out_odb = tempPath("nlgen_out2.odb").string();
   const std::string cfg =
       "{\"instance_count\": 10, \"tech_lef_path\": \"" + lef
-      + "\", \"target_avg_fanout\": 3.0, \"output_odb_path\": \"" + out_odb
-      + "\"}";
+      + "\", \"sequential_ratio\": 0.2, \"target_avg_fanout\": 3.0, "
+      "\"output_odb_path\": \"" + out_odb + "\"}";
   const std::string path = writeTempFile("nlgen_malformedlef.json", cfg);
   const RunResult r = runProcess({NETLISTGEN_CLI_BIN, path});
   EXPECT_TRUE(r.exited_normally) << "process crashed (signal) instead of "

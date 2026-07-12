@@ -9,6 +9,7 @@
 #include <initializer_list>
 #include <random>
 #include <string>
+#include <unordered_map>
 
 #include "odb/db.h"
 #include "odb/geom.h"
@@ -42,6 +43,7 @@ constexpr int kMsgDerivedDist = 308;
 constexpr int kMsgTolerance = 309;
 constexpr int kMsgLefLoad = 310;
 constexpr int kMsgNoLefMasters = 311;
+constexpr int kMsgSeqBootstrap = 312;
 
 // Bucket 0..4 for a signal-pin count: 2->0, 3->1, 4->2, 5->3, >=6->4.
 // Anything below 2 (tie/fill/antenna cells) belongs to no bucket.
@@ -257,6 +259,21 @@ bool validateSpecConfig(const SyntheticNetlistSpec& spec, utl::Logger* logger)
     if (logger) {
       logger->warn(utl::UKN, kMsgSeqRatio,
                    "sequential_ratio must be in [0, 1], got {}", seq_ratio);
+    }
+    return false;
+  }
+  // Stage D bootstrap-source requirement: acyclic net formation needs
+  // sequential Q outputs as the only always-valid signal source — no primary
+  // input ports exist until Stage E (which relaxes this to "sequential_ratio
+  // > 0 OR primary_input_count > 0"). An unset ratio counts as 0.
+  if (seq_ratio <= 0.0) {
+    if (logger) {
+      logger->warn(utl::UKN, kMsgSeqBootstrap,
+                   "sequential_ratio must be > 0 (got {}): sequential Q "
+                   "outputs are the only bootstrap signal source for the "
+                   "combinational DAG until primary input ports arrive in "
+                   "Stage E",
+                   seq_ratio);
     }
     return false;
   }
@@ -695,9 +712,11 @@ bool buildPlan(NetlistBuilder& builder, const SyntheticNetlistSpec& spec,
 
 // Form nets from two shuffled pin pools: one driver (OUTPUT) plus `fanout`
 // sinks (INPUT/INOUT) per net — fanout is the load count, driver excluded —
-// popping each iterm at most once. Power/ground pins are never eligible. Shared
-// by the legacy and statistical paths. (Fanout was redefined from pins-per-net
-// to loads, so net shapes shift by one sink vs. the original Stage A output.)
+// popping each iterm at most once. Power/ground pins are never eligible.
+// LEGACY (Stage A) PATH ONLY since Stage D: unconstrained pairing can create
+// combinational cycles, so the statistical path uses formNetsAcyclic below.
+// (Fanout was redefined from pins-per-net to loads, so net shapes shift by
+// one sink vs. the original Stage A output.)
 int formNets(NetlistBuilder& builder,
              const std::vector<odb::dbInst*>& insts,
              const SyntheticNetlistSpec& spec, std::mt19937& rng)
@@ -757,6 +776,182 @@ int formNets(NetlistBuilder& builder,
                  nets_made, static_cast<int>(drivers.size()),
                  static_cast<int>(sinks.size()));
     }
+  }
+  return nets_made;
+}
+
+// Stage D: ordered, combinational-loop-free net formation for the statistical
+// path. Instance creation order (the insts vector, u0..u{n-1}) doubles as a
+// topological (DAG) order over the combinational cells:
+//
+//   - A combinational output at index i may only drive (a) inputs of
+//     sequential instances — any index — or (b) inputs of combinational
+//     instances at indices > i. Every comb->comb edge therefore goes strictly
+//     forward in index order, so no combinational cycle can be constructed.
+//   - A sequential (Q) output is an always-valid driver and may feed any
+//     unused input, earlier or later — a register output is the loop-breaker.
+//   - Sequential inputs (D/CK) accept any driver; feedback through a register
+//     is a legitimate sequential loop, not a combinational one.
+//
+// Only the receiver-ELIGIBILITY ruleset differs from Stage B's formNets: the
+// receiver count per net is still drawn uniformly from
+// [min_fanout, max_fanout] (keep these concerns separate — Stage E adds
+// primary ports as one more driver/receiver class without touching the count
+// machinery). Documented bootstrap/tail behavior when the eligible pool runs
+// thin (typically late in the order, where only sequential inputs remain
+// eligible for a combinational driver): the net is formed with fewer
+// receivers than min_fanout (>= 1, counted + debug-logged), and a driver with
+// ZERO eligible receivers forms no net at all (skipped, counted +
+// debug-logged) — deterministic, never a sinkless net, never a stall.
+int formNetsAcyclic(NetlistBuilder& builder,
+                    const std::vector<odb::dbInst*>& insts,
+                    const SyntheticNetlistSpec& spec, std::mt19937& rng)
+{
+  const int n = static_cast<int>(insts.size());
+  utl::Logger* logger = builder.logger();
+
+  // Receiver pools. Every entry is an unused non-power/ground INPUT/INOUT
+  // iterm. seq_pool: sequential-instance inputs, eligible for every driver.
+  // comb_active: combinational-instance inputs whose owner has not been
+  // processed yet, eligible for every driver. comb_retired: combinational
+  // inputs whose owner HAS been processed — eligible for sequential drivers
+  // only (a combinational driver may not feed an earlier-or-own instance).
+  std::vector<odb::dbITerm*> seq_pool;
+  std::vector<odb::dbITerm*> comb_active;
+  std::vector<odb::dbITerm*> comb_retired;
+  std::unordered_map<odb::dbITerm*, size_t> active_pos;  // iterm -> index
+  std::vector<std::vector<odb::dbITerm*>> comb_inputs_of(n);
+  std::vector<char> inst_is_seq(n, 0);
+
+  for (int i = 0; i < n; ++i) {
+    inst_is_seq[i] = isSequentialMaster(insts[i]->getMaster()) ? 1 : 0;
+    for (odb::dbITerm* iterm : insts[i]->getITerms()) {
+      const odb::dbSigType st = iterm->getSigType();
+      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
+        continue;
+      }
+      const auto io = iterm->getIoType().getValue();
+      if (io != odb::dbIoType::INPUT && io != odb::dbIoType::INOUT) {
+        continue;
+      }
+      if (inst_is_seq[i]) {
+        seq_pool.push_back(iterm);
+      } else {
+        active_pos[iterm] = comb_active.size();
+        comb_active.push_back(iterm);
+        comb_inputs_of[i].push_back(iterm);
+      }
+    }
+  }
+
+  // Swap-remove from comb_active, keeping active_pos consistent.
+  auto takeFromActive = [&](size_t idx) {
+    odb::dbITerm* taken = comb_active[idx];
+    active_pos.erase(taken);
+    comb_active[idx] = comb_active.back();
+    comb_active.pop_back();
+    if (idx < comb_active.size()) {
+      active_pos[comb_active[idx]] = idx;
+    }
+    return taken;
+  };
+
+  std::uniform_int_distribution<int> pick_fanout(spec.min_fanout,
+                                                 spec.max_fanout);
+  int nets_made = 0;
+  int loosened = 0;
+  int skipped = 0;
+  for (int i = 0;
+       i < n && (spec.num_nets < 0 || nets_made < spec.num_nets); ++i) {
+    // Retire this instance's still-unused inputs BEFORE forming its net(s):
+    // from here on they are reachable only from sequential (Q) drivers, and
+    // a combinational driver can never feed its own instance.
+    for (odb::dbITerm* iterm : comb_inputs_of[i]) {
+      const auto pos = active_pos.find(iterm);
+      if (pos != active_pos.end()) {
+        takeFromActive(pos->second);
+        comb_retired.push_back(iterm);
+      }
+    }
+
+    const bool seq_driver = inst_is_seq[i] != 0;
+    for (odb::dbITerm* out : insts[i]->getITerms()) {
+      if (spec.num_nets >= 0 && nets_made >= spec.num_nets) {
+        break;
+      }
+      const odb::dbSigType st = out->getSigType();
+      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND
+          || out->getIoType() != odb::dbIoType::OUTPUT) {
+        continue;
+      }
+      size_t eligible = seq_pool.size() + comb_active.size()
+                        + (seq_driver ? comb_retired.size() : 0);
+      if (eligible == 0) {
+        ++skipped;
+        if (logger != nullptr && skipped <= kTraceCap) {
+          debugPrint(logger, utl::UKN, kGroup, kVerbosityTrace,
+                     "  driver {} skipped: no eligible receivers{}",
+                     out->getName(),
+                     skipped == kTraceCap ? " (skip trace capped)" : "");
+        }
+        continue;
+      }
+      const int want = pick_fanout(rng);
+      const int k = static_cast<int>(
+          std::min<size_t>(static_cast<size_t>(want), eligible));
+
+      odb::dbNet* net = builder.makeNet("n" + std::to_string(nets_made));
+      out->connect(net);
+      for (int s = 0; s < k; ++s) {
+        std::uniform_int_distribution<size_t> pick(0, eligible - 1);
+        size_t r = pick(rng);
+        odb::dbITerm* sink = nullptr;
+        if (r < seq_pool.size()) {
+          sink = seq_pool[r];
+          seq_pool[r] = seq_pool.back();
+          seq_pool.pop_back();
+        } else if (r -= seq_pool.size(); r < comb_active.size()) {
+          sink = takeFromActive(r);
+        } else {
+          r -= comb_active.size();
+          sink = comb_retired[r];
+          comb_retired[r] = comb_retired.back();
+          comb_retired.pop_back();
+        }
+        sink->connect(net);
+        --eligible;
+      }
+      if (k < spec.min_fanout) {
+        ++loosened;
+        if (logger != nullptr && loosened <= kTraceCap) {
+          debugPrint(logger, utl::UKN, kGroup, kVerbosityTrace,
+                     "  net n{} loosened: {} receivers (min_fanout {}), "
+                     "eligible pool thin{}",
+                     nets_made, k, spec.min_fanout,
+                     loosened == kTraceCap ? " (loosen trace capped)" : "");
+        }
+      } else if (logger != nullptr && nets_made < kTraceCap) {
+        debugPrint(logger, utl::UKN, kGroup, kVerbosityTrace,
+                   "  net n{}: 1 driver + {} sinks{}", nets_made, k,
+                   nets_made + 1 == kTraceCap ? " (per-net trace capped)" : "");
+      }
+      ++nets_made;
+      if (logger != nullptr && nets_made % 100000 == 0) {
+        debugPrint(logger, utl::UKN, kGroup, kVerbosityHeartbeat,
+                   "formNetsAcyclic: {} nets formed, pools: {} seq / {} "
+                   "active / {} retired",
+                   nets_made, static_cast<int>(seq_pool.size()),
+                   static_cast<int>(comb_active.size()),
+                   static_cast<int>(comb_retired.size()));
+      }
+    }
+  }
+  if (logger != nullptr) {
+    debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,
+               "formNetsAcyclic: {} nets ({} below min_fanout at the thin "
+               "tail of the order, {} drivers skipped with no eligible "
+               "receiver)",
+               nets_made, loosened, skipped);
   }
   return nets_made;
 }
@@ -830,7 +1025,9 @@ int generateStatistical(NetlistBuilder& builder,
     }
   }
 
-  const int nets_made = formNets(builder, insts, spec, rng);
+  // Stage D: ordered, acyclic-by-construction net formation (the legacy path
+  // keeps the original shuffled-pool formNets).
+  const int nets_made = formNetsAcyclic(builder, insts, spec, rng);
 
   // Post-generation empirical check: logged warning only, never a failure.
   const double tol = spec.distribution_tolerance_pct;

@@ -9,15 +9,18 @@ function `generateSynthetic()`, which fills a builder's block from a
 and a driver: the DEF / `.odb` writers (`netlist_writers.h/.cpp`), the net
 well-formedness check (`netlist_validation.h/.cpp`), and a standalone
 JSON-driven CLI (`cli_config.h/.cpp`, `netlistgen_cli.cpp`). This reflects the
-code as of Stage C (LEF-backed generation + statistical cell mix + max-entropy
-solve + writers + validation + CLI).
+code as of Stage D (LEF-backed generation + statistical cell mix + max-entropy
+solve + writers + validation + CLI + acyclic net formation).
 
-**Loop-avoidance caveat.** Combinational-loop avoidance is **Stage D** (not yet
-landed): net formation still pairs drivers/sinks from shuffled pools, so
-generated blocks — and any DEF/`.odb` the CLI writes — are structurally
-well-formed but **may contain combinational loops**. Treat them as
-preview/manual-inspection artifacts, not yet valid downstream fixtures.
-Primary I/O ports and a Verilog writer are **Stage E**.
+**Combinational-loop freedom (Stage D).** Statistical-mix net formation is
+**acyclic by construction**: `formNetsAcyclic` reuses the instance creation
+index as a topological order and filters receiver eligibility so every
+comb→comb edge goes strictly forward (see its section below). This requires
+`sequential_ratio > 0` (fail-fast in `validateSpecConfig`) — sequential Q
+outputs bootstrap the combinational DAG until Stage E adds primary-input
+ports. The legacy weighted mix keeps the original shuffled-pool `formNets`
+and makes no acyclicity guarantee. Primary I/O ports and a Verilog writer
+are **Stage E**.
 
 ## `netlistgen.h` — API surface
 
@@ -139,10 +142,16 @@ graph TD
   lef -->|no| mode{"usesStatisticalMix()?"}
   mode -->|no| legacy["generateLegacy:<br/>makeMaster per MasterSpec<br/>discrete_distribution weighted picks<br/>(Stage A path; deterministic)"]
   mode -->|yes| stat["generateStatistical"]
-  legacy --> fn["formNets"]
-  stat --> fn
+  legacy --> fn["formNets (shuffled pools,<br/>no acyclicity guarantee)"]
+  stat --> fna["formNetsAcyclic (Stage D:<br/>ordered, loop-free by construction)"]
   fn --> ret["return nets_made"]
+  fna --> ret
 ```
+
+Note `validateSpecConfig` (run first) also enforces the Stage D
+bootstrap-source rule: a statistical spec with `sequential_ratio <= 0`
+(unset counts as 0) fails fast — sequential Q outputs are the only signal
+source that can start the combinational DAG until Stage E's primary inputs.
 
 ## `netlistgen.cpp` — statistical generation
 
@@ -170,17 +179,23 @@ graph TD
   reps --> okplan[plan ready]
 
   okplan --> gen["for each of num_insts:<br/>roll seq vs comb (sequential_ratio)<br/>comb: pick_bucket then uniform master<br/>makeInst"]
-  gen --> fn2["formNets"]
+  gen --> fn2["formNetsAcyclic (Stage D)"]
   fn2 --> tol["empirical seq ratio / bucket shares /<br/>Mode-B mean vs targets<br/>-> warn if beyond tolerance (never fail)"]
 ```
 
-## `netlistgen.cpp` — `formNets()` (shared)
+The cell mix is decided entirely before net formation, so Stage D's ordered
+formation cannot disturb the empirical proportions the tolerance check
+measures.
 
-Both regimes end here. Terminals are bucketed into driver/sink pools by
-IoType, with power/ground excluded by `dbSigType`. Each net gets one driver
-plus `fanout` sinks, where `fanout` is the load count (driver excluded). Every
-iterm is popped at most once, so the netlist is valid (each pin on ≤ 1 net) —
-**though not yet acyclic; Stage D adds that**.
+## `netlistgen.cpp` — `formNets()` (legacy path only)
+
+The legacy weighted mix ends here. Terminals are bucketed into driver/sink
+pools by IoType, with power/ground excluded by `dbSigType`. Each net gets one
+driver plus `fanout` sinks, where `fanout` is the load count (driver
+excluded). Every iterm is popped at most once, so the netlist is valid (each
+pin on ≤ 1 net) — but the pairing is unconstrained, so **this path makes no
+acyclicity guarantee** (it predates Stage D and supports multi-output
+masters with no sequential/combinational classification).
 
 ```mermaid
 graph TD
@@ -199,6 +214,54 @@ graph TD
   fan --> sinkloop["connect up to k sinks; pop"]
   sinkloop --> incr["++nets_made"]
   incr --> whilecond
+```
+
+## `netlistgen.cpp` — `formNetsAcyclic()` (Stage D, statistical path)
+
+The statistical mix ends here instead. Instance creation order (`u0..u{n-1}`)
+doubles as a topological order over the combinational cells; drivers are
+processed in that same order and receiver *eligibility* is filtered while the
+receiver *count* stays governed by `[min_fanout, max_fanout]`. Three receiver
+pools carry the eligibility state:
+
+- `seq_pool` — unused sequential-instance inputs (D/CK). Eligible for
+  **every** driver: register inputs accept any source (feedback through a
+  register is sequential, not combinational).
+- `comb_active` — unused combinational inputs whose owner instance has **not
+  been processed yet** (index > current `i`). Eligible for every driver.
+- `comb_retired` — unused combinational inputs whose owner **has** been
+  processed (index ≤ `i`). Eligible for **sequential (Q) drivers only**: a
+  combinational driver may never feed an earlier-or-own instance.
+
+At step `i` the instance's own unused inputs are retired *before* its net is
+formed (so it can never drive itself), then each of its output pins draws
+receivers uniformly from the union of its eligible pools (swap-remove
+sampling; `active_pos` keeps `comb_active` O(1) under removal). Every
+comb→comb edge therefore satisfies `driver index < receiver index` — a DAG by
+construction. Thin-pool behavior is deterministic and documented in
+README.md: a net whose eligible pool cannot cover `min_fanout` is loosened
+(≥ 1 receiver, counted + debug-logged); a driver with zero eligible
+receivers is skipped entirely (no net — never a sinkless net, never a
+stall).
+
+```mermaid
+graph TD
+  fill["for each inst i, for each iterm:<br/>skip POWER/GROUND + non-INPUT/INOUT<br/>seq inst -> seq_pool<br/>comb inst -> comb_active (+active_pos)"] --> loop{"i = 0..n-1, net cap not hit?"}
+  loop -->|done| summary["debug: nets / loosened / skipped counts<br/>return nets_made"]
+  loop --> retire["retire inst i's unused comb inputs:<br/>comb_active -> comb_retired"]
+  retire --> outs["for each OUTPUT pin of inst i"]
+  outs --> elig["eligible = seq_pool + comb_active<br/>+ comb_retired if seq driver"]
+  elig --> zero{"eligible == 0?"}
+  zero -->|yes| skipd["skip driver (no net); ++skipped"]
+  zero -->|no| draw["want = pick_fanout(rng)<br/>k = min(want, eligible)"]
+  draw --> mk["makeNet n{k}; connect driver"]
+  mk --> sample["k times: uniform index into pool union<br/>swap-remove; connect sink"]
+  sample --> loose{"k < min_fanout?"}
+  loose -->|yes| cnt["++loosened (trace-logged)"]
+  loose -->|no| next["++nets_made"]
+  cnt --> next
+  skipd --> loop
+  next --> loop
 ```
 
 ## Engine-level flow: spec → block → hypergraph
@@ -234,8 +297,8 @@ sequenceDiagram
     end
   end
   GS->>ODB: read iterms, bucket by IoType (skip power/ground)
-  loop until pools drain / num_nets
-    GS->>NB: makeNet + connect driver + sinks
+  loop drivers in creation order (statistical: formNetsAcyclic) / until pools drain (legacy: formNets)
+    GS->>NB: makeNet + connect driver + eligible sinks
     NB->>ODB: dbNet + iterm->connect
   end
   GS->>GS: empirical tolerance check (warn only)

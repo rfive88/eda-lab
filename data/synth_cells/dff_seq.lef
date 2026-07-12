@@ -1,0 +1,54 @@
+# Minimal hand-written sequential cell LEF used by the netlistgen Stage B/D
+# tests. One flip-flop-like cell whose CK pin is declared USE CLOCK, so it is
+# classified sequential via the dbSigType::CLOCK path (no name fallback
+# needed). Loaded alongside twobucket.lef (which has ONLY combinational
+# cells) whenever a test needs a non-empty sequential class — Stage D made
+# sequential_ratio > 0 mandatory in statistical mode, so success-path tests
+# against the twobucket fixture also load this file. twobucket.lef stays
+# sequential-free on purpose for the empty-sequential-class fail-fast test.
+#
+# Loaded against Nangate45_tech.lef (same SITE / metal1 layer). Geometry is
+# nominal; the cell exists for connectivity classification only.
+VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+
+MACRO DFFSYN
+  CLASS CORE ;
+  SIZE 0.57 BY 1.4 ;
+  SITE FreePDK45_38x28_10R_NP_162NW_34O ;
+  PIN D
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.0 0.0 0.05 0.05 ;
+    END
+  END D
+  PIN CK
+    DIRECTION INPUT ;
+    USE CLOCK ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.1 0.0 0.15 0.05 ;
+    END
+  END CK
+  PIN Q
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.2 0.0 0.25 0.05 ;
+    END
+  END Q
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+  END VSS
+END DFFSYN
+
+END LIBRARY

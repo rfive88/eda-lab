@@ -5,28 +5,19 @@ calls — optionally backed by real LEF cells — so tests and benchmarks can
 create netlists of any size with exactly known or statistically controlled
 topology, then feed them to `Hypergraph::buildFromBlock()`.
 
-> **Migration status (Stage C of 5).** Stage A promoted `netlistgen` from a
-> Stage 1/2 test utility into an engine and made pin access IoType-based.
-> Stage B added LEF-backed masters (real cells) and a statistical cell mix
-> (forward + max-entropy modes). **Stage C (this stage)** adds DEF / `.odb`
-> writers, a net well-formedness validation pass, and a standalone
-> JSON-driven CLI executable (`netlistgen_cli`). Still landing later:
-> - **Stage D** — combinational-loop avoidance (provably acyclic net
->   formation). **Until it lands the generator can produce combinational
->   cycles** — net formation still pairs drivers/sinks from shuffled pools.
-> - **Stage E** — primary I/O ports and a Verilog writer.
->
-> ⚠️ **Loop-avoidance caveat (read before using generated files).** Stage C's
-> writers and CLI produce output that is structurally **well-formed** (every
-> net has exactly one driver, ≥1 sink, no dangling nets — enforced by the
-> validation pass below) but **not yet guaranteed free of combinational
-> loops**. That guarantee is Stage D. Treat DEF / `.odb` files from this stage
-> as **preview / manual-inspection artifacts** for getting a feel for the
-> generator's output shape — **not** as valid fixtures for Stage 3 or any
-> other downstream flow. Stage C does **not** complete "Phase 1"; Stage D
-> still needs to land first. (Stage C was deliberately sequenced ahead of
-> Stage D to get hands-on CLI output sooner — the reordering is safe because
-> loop avoidance depends only on Stage B's work, not on this stage.)
+> **Migration status (Stage D of 5 — "Phase 1" complete).** Stage A promoted
+> `netlistgen` from a Stage 1/2 test utility into an engine and made pin
+> access IoType-based. Stage B added LEF-backed masters (real cells) and a
+> statistical cell mix (forward + max-entropy modes). Stage C added DEF /
+> `.odb` writers, a net well-formedness validation pass, and a standalone
+> JSON-driven CLI executable (`netlistgen_cli`). **Stage D (this stage)**
+> makes statistical-mix net formation **combinational-loop-free by
+> construction** (see "Combinational-loop avoidance" below), which completes
+> Phase 1: generated DEF / `.odb` output is now genuinely valid — well-formed
+> *and* acyclic — and ready to serve as Stage 3 benchmark fixtures. Still
+> landing later:
+> - **Stage E** — primary I/O ports and a Verilog writer (and relaxation of
+>   the `sequential_ratio > 0` requirement below).
 >
 > See `FLOW.md` for algorithmic flow diagrams.
 
@@ -65,12 +56,74 @@ Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
     a pin-count bucket from the effective distribution and a master uniformly
     among that bucket's cells.
 
-  Net formation is shared by both regimes: terminals are bucketed into a
-  driver pool (`OUTPUT`) and a sink pool (`INPUT`/`INOUT`) **by IoType, with
-  power/ground pins excluded by `dbSigType`**; each net takes one driver and
-  `fanout` sinks (fanout excludes the driver) from the shuffled pools, so every
-  iterm lands on at most one net. Returns the net count, or **`-1`** if the
-  spec fails validation.
+  Net formation classifies terminals **by IoType, with power/ground pins
+  excluded by `dbSigType`** (drivers = `OUTPUT`, sinks = `INPUT`/`INOUT`),
+  and every iterm lands on at most one net. The two regimes then differ:
+  - **Statistical mix** uses the Stage D **ordered, acyclic-by-construction**
+    formation (`formNetsAcyclic` — see "Combinational-loop avoidance" below).
+  - **Legacy weighted mix** keeps the original shuffled-pool pairing
+    (`formNets`): one driver plus `fanout` sinks popped from shuffled pools.
+    **No acyclicity guarantee on this path** — it exists for Stage A
+    compatibility, supports multi-output masters, and has no
+    sequential/combinational classification to build a DAG order from.
+
+  Returns the net count, or **`-1`** if the spec fails validation.
+
+## Combinational-loop avoidance (Stage D)
+
+Statistical-mix netlists are **guaranteed free of combinational loops by
+construction** — no post-hoc cycle detection, no repair pass. The design
+reuses the instance creation index (`u0..u{n-1}`) directly as a topological
+(DAG) order; `formNetsAcyclic` processes drivers in that same order and
+filters receiver *eligibility* (the receiver *count* per net is still drawn
+uniformly from `[min_fanout, max_fanout]` — the Stage B statistical
+machinery is untouched, so Stage E can add primary ports as one more
+driver/receiver class without a rewrite):
+
+- **Sequential (Q) outputs are always-valid drivers**, regardless of order —
+  a register output is the loop-breaker.
+- **Sequential inputs (D/CK) are always-valid sinks** — a D pin may depend
+  on nets that transitively depend on its own Q; that is a legitimate
+  sequential feedback loop, not a combinational one.
+- **A combinational output at index `i` may only drive** sequential-instance
+  inputs (any index) or combinational-instance inputs at indices **`> i`**
+  (instances not yet processed). Never an earlier combinational instance,
+  never itself. Every comb→comb edge therefore goes strictly forward in
+  index order, so no combinational cycle can exist. (Stage B's
+  multi-output-exclusion work makes "the single combinational output"
+  assumption safe.)
+
+**Bootstrap-source requirement: `sequential_ratio > 0` is mandatory** in
+statistical mode (an unset ratio counts as 0) and fails fast at spec-build
+time in `validateSpecConfig`: sequential Q outputs are the only valid signal
+source to start the combinational DAG from — no primary-input ports exist
+until Stage E, which relaxes this back to "at least one of
+`sequential_ratio > 0` or `primary_input_count > 0`".
+
+**Thin-pool behavior (deterministic, chosen over fail-fast):** where the
+eligible pool runs thin — typically the *tail* of the creation order, where
+a combinational driver's only remaining candidates are unused sequential
+inputs — the net is **loosened**: it is formed with fewer receivers than
+`min_fanout` (always ≥ 1), counted and debug-logged. A driver with **zero**
+eligible receivers forms **no net at all** (skipped, counted and
+debug-logged) — never a sinkless net, never a stall or retry loop.
+Loosening was chosen over fail-fast because a thin tail is a structural
+certainty of the ordered filter (the last combinational instance in order
+*never* has later combinational candidates), so failing would make many
+perfectly reasonable configs unusable; a shorter tail net keeps the run
+deterministic, well-formed, and honest about what was feasible.
+
+**Expected distribution shift vs the Stage B baseline** (known structural
+effect, not a regression): the *cell mix* is untouched (instances are rolled
+before net formation — Stage B's statistical-validation test still passes
+within `distribution_tolerance_pct` unchanged), and per-net fanout is still
+uniform over `[min_fanout, max_fanout]` for the body of the run. What
+shifts: **fewer nets for the same config** (tail drivers get skipped once
+only-sequential candidates remain and are consumed — e.g. the 1500-inst
+LEF-backed manual config produced 1007 nets with every fanout in [2, 5] and
+mean 3.55, where unconstrained pairing had run the sink pool to exhaustion),
+a possible handful of **below-`min_fanout` tail nets** at small scale, and
+correspondingly **more input pins left unconnected**.
 
 ## Statistical cell-mix contract
 
@@ -120,7 +173,8 @@ Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
   - A combinational master must resolve to **exactly one output** and
     `(pin_count − 1)` inputs; **multi-output combinational masters are
     excluded** from bucket population (logged). This is a load-bearing
-    assumption for Stage C's DAG net formation, enforced now.
+    assumption for Stage D's DAG net formation (one output pin per
+    combinational instance), enforced since Stage B.
   - A **requested** bucket (positive probability) with no matching master —
     or `sequential_ratio > 0` with an empty sequential class — is a
     **hard failure at spec-build time**, naming the empty bucket/class. No
@@ -214,7 +268,7 @@ never into the `netlistgen` library). The schema is a serialization of
 | `fanout_range` `{min,max}` | `spec.min_fanout` / `max_fanout` | Optional. Load pins per net (fanout), driver excluded. |
 | `tech_lef_path` | `spec.tech_lef_path` | Optional; engages LEF mode. |
 | `cell_lef_paths` | `spec.cell_lef_paths` | Optional array. |
-| `sequential_ratio` | `spec.sequential_ratio` | Optional. |
+| `sequential_ratio` | `spec.sequential_ratio` | **Required > 0** since Stage D (bootstrap-source rule; enforced at generation time). |
 | `combinational_pin_distribution` | `spec.combinational_pin_distribution` | Object keyed `"2","3","4","5","6+"`, sum 100. Mode A. |
 | `target_avg_fanout` | `spec.target_avg_fanout` | Mode B (mutually exclusive with the distribution). |
 | `distribution_tolerance_pct` | `spec.distribution_tolerance_pct` | Optional (default 2.0). |
@@ -256,7 +310,7 @@ Mode A example (explicit distribution, LEF-backed, both outputs):
   "fanout_range": { "min": 2, "max": 6 },
   "tech_lef_path": "data/nangate45/Nangate45_tech.lef",
   "cell_lef_paths": ["data/nangate45/Nangate45_stdcell.lef"],
-  "sequential_ratio": 0.0,
+  "sequential_ratio": 0.1,
   "combinational_pin_distribution": {"2":20,"3":30,"4":20,"5":20,"6+":10},
   "distribution_tolerance_pct": 2.0,
   "output_def_path": "run/generated.def",
@@ -326,7 +380,7 @@ Consumed downstream by `Hypergraph::buildFromBlock()`.
 | `seed` | `uint32_t` | `1` | RNG seed; fixes output for a given spec. |
 | `tech_lef_path` | `std::optional<std::string>` | unset | If set, load real tech (and its macros) via `lefin`. |
 | `cell_lef_paths` | `std::vector<std::string>` | `{}` | Extra cell LEF(s) against that tech. |
-| `sequential_ratio` | `std::optional<double>` | unset (→ 0.0) | Fraction of instances that are sequential. |
+| `sequential_ratio` | `std::optional<double>` | unset (→ 0.0, **fails validation**) | Fraction of instances that are sequential; must be `> 0` in statistical mode (Stage D bootstrap-source rule). |
 | `combinational_pin_distribution` | `std::optional<array<double,5>>` | unset | Mode A percentages `[2,3,4,5,6+]`, sum 100. |
 | `target_avg_fanout` | `std::optional<double>` | unset | Mode B target mean fanout (signal pins minus the driver, `#pins−1`); synthetic range `(1, 5)`. |
 | `distribution_tolerance_pct` | `double` | `2.0` | Post-gen deviation warning threshold. |
@@ -396,7 +450,8 @@ if (eda::validateNetlist(nb.block()).ok) {     // structural well-formedness
 ```bash
 cmake -B build
 cmake --build build --target netlistgen_test netlistgen_stageb_test \
-      netlistgen_stagec_test netlistgen_link_smoke netlistgen_cli
+      netlistgen_stagec_test netlistgen_staged_test netlistgen_link_smoke \
+      netlistgen_cli
 ctest --test-dir build -R "netlistgen" --output-on-failure
 ```
 
@@ -407,8 +462,9 @@ ctest --test-dir build -R "netlistgen" --output-on-failure
   max-entropy solve correctness, spec-config validation (both/neither mode,
   bad sum, out-of-range target), signal-pin counting on a Nangate45 NAND2,
   LEF-backed generation, multi-output exclusion, empty-bucket/empty-sequential
-  fail-fast (using `data/synth_cells/twobucket.lef`), large-run statistical
-  validation, Mode B mean, determinism, and die-area sizing.
+  fail-fast (using `data/synth_cells/twobucket.lef` — plus `dff_seq.lef`
+  where a non-empty sequential class is needed since Stage D), large-run
+  statistical validation, Mode B mean, determinism, and die-area sizing.
 - `test/netlistgen_stagec_test.cpp` — Stage C (needs `EDA_LAB_DATA_DIR` and the
   built `netlistgen_cli` binary): well-formedness passing on synthetic +
   LEF-backed output and flagging hand-built dangling / driverless /
@@ -417,16 +473,29 @@ ctest --test-dir build -R "netlistgen" --output-on-failure
   malformed JSON); the CLI validate-before-write fail-fast on a malformed
   block; and a CLI smoke test that spawns `netlistgen_cli`, round-trips the
   DEF back through `defin`, and confirms instance/net counts.
+- `test/netlistgen_staged_test.cpp` — Stage D (needs `EDA_LAB_DATA_DIR` and
+  the built `netlistgen_cli` binary): detector sanity on a hand-built
+  two-inverter loop (and a register feedback loop that must NOT count);
+  loop-freedom via DFS cycle detection (sequential instances cut at the D/Q
+  boundary) on synthetic runs at 300 / 5 000 / 50 000 instances × 3 seeds
+  and LEF-backed runs × 2 seeds, plus the stronger construction invariant
+  (every comb→comb edge follows creation order) and
+  `Hypergraph::buildFromBlock` consuming the acyclic block unmodified; the
+  `sequential_ratio > 0` fail-fast (zero, unset, just-above-zero, legacy
+  exemption); the thin-pool bootstrap edge case (loosened/skipped tail,
+  never a sinkless net, bit-identical on rerun); and a CLI spawn whose DEF
+  output round-trips through `defin` loop-free.
 - `test/netlistgen_link_smoke.cpp` — library-linkage guard.
 
 Scale reference: ~500k insts / ~1.4M pins generate in about 2 s (synthetic).
 
 ## Open questions / follow-on
 
-- **Stage D** — combinational-loop avoidance (the completion gate for Phase 1).
 - **Stage E (not yet implemented)** — primary I/O ports (`PINS` section,
   primary-input `dbBTerm` drivers / primary-output `dbBTerm` sinks folded into
   `validateNetlist`) and a Verilog writer, plus `output_verilog_path` and
-  primary-port fields on the CLI config.
+  primary-port fields on the CLI config; relaxes the Stage D
+  `sequential_ratio > 0` requirement to "sequential_ratio > 0 OR
+  `primary_input_count` > 0".
 - Custom prior distribution for Mode B's max-entropy tilt (currently uniform).
 - YAML config support alongside JSON.

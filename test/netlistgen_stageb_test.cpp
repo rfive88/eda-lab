@@ -1,7 +1,9 @@
 // Stage B tests for the netlistgen engine: LEF-backed generation, the
 // statistical cell mix (both modes), the max-entropy solve, spec validation,
 // and the shared signal-pin counting rule. Needs EDA_LAB_DATA_DIR (Nangate45
-// LEF fixtures + the hand-written data/synth_cells/twobucket.lef fixture).
+// LEF fixtures + the hand-written data/synth_cells/twobucket.lef and
+// dff_seq.lef fixtures). Since Stage D every statistical spec must set
+// sequential_ratio > 0 (bootstrap requirement of the acyclic net formation).
 
 #include <array>
 #include <cmath>
@@ -30,6 +32,10 @@ std::string stdcellLef()
 std::string twoBucketLef()
 {
   return dataDir() + "/synth_cells/twobucket.lef";
+}
+std::string dffSeqLef()
+{
+  return dataDir() + "/synth_cells/dff_seq.lef";
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +89,7 @@ TEST(SpecValidationTest, ModeBValid)
 {
   SyntheticNetlistSpec spec;
   spec.num_insts = 10;
+  spec.sequential_ratio = 0.1;  // Stage D: mandatory > 0 in statistical mode
   spec.target_avg_fanout = 3.5;  // fanout (pins-1); valid range is (1, 5)
   EXPECT_TRUE(validateSpecConfig(spec, nullptr));
   // A fanout of 2 (pin-count target 3) is well inside the range — it was
@@ -112,6 +119,7 @@ TEST(SpecValidationTest, DistributionMustSumTo100)
 {
   SyntheticNetlistSpec spec;
   spec.num_insts = 10;
+  spec.sequential_ratio = 0.1;  // valid, so the failure is the bad sum
   spec.combinational_pin_distribution = std::array<double, 5>{10, 20, 20, 20, 20};
   EXPECT_FALSE(validateSpecConfig(spec, nullptr));
 }
@@ -122,6 +130,7 @@ TEST(SpecValidationTest, TargetOutOfRangeFails)
   // pin-count anchor range (2, 6) shifted down by one => (1, 5), strict.
   SyntheticNetlistSpec spec;
   spec.num_insts = 10;
+  spec.sequential_ratio = 0.1;  // valid, so the failure is the bad target
   spec.target_avg_fanout = 5.0;  // upper boundary of (1, 5)
   EXPECT_FALSE(validateSpecConfig(spec, nullptr));
   spec.target_avg_fanout = 1.0;  // lower boundary
@@ -225,7 +234,9 @@ SyntheticNetlistSpec lefSpec()
   spec.tech_lef_path = techLef();
   spec.cell_lef_paths = {stdcellLef()};
   spec.num_insts = 500;
-  spec.sequential_ratio = 0.0;  // pure combinational; sequential path tested below
+  // Stage D: sequential_ratio must be > 0 (Q outputs bootstrap the
+  // combinational DAG); deeper sequential-classification checks are below.
+  spec.sequential_ratio = 0.1;
   spec.combinational_pin_distribution = std::array<double, 5>{20, 20, 20, 20, 20};
   spec.min_fanout = 2;
   spec.max_fanout = 5;
@@ -256,10 +267,10 @@ TEST(LefGenerationTest, GeneratesValidNetlist)
   }
 }
 
-// With sequential_ratio 0, only single-output combinational masters are chosen.
-// Genuine multi-output combinational cells (FA_X1, HA_X1) are excluded; the DFF
-// variants are now recognised as sequential (not multi-output comb) and so are
-// simply not drawn from the combinational pool here.
+// Every combinational instance uses a single-output master. Genuine
+// multi-output combinational cells (FA_X1, HA_X1) are excluded; the DFF
+// variants are recognised as sequential (not multi-output comb), so they are
+// checked separately (sequential_ratio > 0 is mandatory since Stage D).
 TEST(LefGenerationTest, ExcludesMultiOutputMasters)
 {
   NetlistBuilder nb("lefexcl");
@@ -267,7 +278,10 @@ TEST(LefGenerationTest, ExcludesMultiOutputMasters)
   ASSERT_GT(nets, 0);
   for (odb::dbInst* inst : nb.block()->getInsts()) {
     EXPECT_NE(signalPinCount(inst->getMaster()), 0);
-    // Any chosen master must be single-output combinational.
+    if (isSequentialMaster(inst->getMaster())) {
+      continue;  // flip-flops (Q+QN) are legitimately multi-output
+    }
+    // Any chosen combinational master must be single-output.
     int outs = 0;
     for (odb::dbMTerm* mt : inst->getMaster()->getMTerms()) {
       if (mt->getIoType() == odb::dbIoType::OUTPUT
@@ -278,8 +292,6 @@ TEST(LefGenerationTest, ExcludesMultiOutputMasters)
     }
     EXPECT_EQ(outs, 1) << inst->getMaster()->getName();
     EXPECT_NE(inst->getMaster()->getName(), "FA_X1");
-    EXPECT_FALSE(isSequentialMaster(inst->getMaster()))
-        << inst->getMaster()->getName();
     EXPECT_FALSE(isLatchMaster(inst->getMaster()))
         << inst->getMaster()->getName();
   }
@@ -331,11 +343,14 @@ TEST(LefBucketTest, EmptyRequestedBucketFailsFast)
 {
   // twobucket.lef populates only buckets 2 (BUFB2) and 4 (AND3B4). A
   // distribution that puts weight on the empty 3-pin bucket must fail.
+  // dff_seq.lef supplies a sequential master so the (valid) sequential_ratio
+  // is satisfiable and the failure is specifically the empty bucket.
   NetlistBuilder nb("emptybucket");
   SyntheticNetlistSpec spec;
   spec.tech_lef_path = techLef();
-  spec.cell_lef_paths = {twoBucketLef()};
+  spec.cell_lef_paths = {twoBucketLef(), dffSeqLef()};
   spec.num_insts = 50;
+  spec.sequential_ratio = 0.1;
   spec.combinational_pin_distribution = std::array<double, 5>{50, 50, 0, 0, 0};
   EXPECT_EQ(generateSynthetic(nb, spec), -1);
 }
@@ -345,8 +360,9 @@ TEST(LefBucketTest, PopulatedBucketsSucceed)
   NetlistBuilder nb("okbucket");
   SyntheticNetlistSpec spec;
   spec.tech_lef_path = techLef();
-  spec.cell_lef_paths = {twoBucketLef()};
+  spec.cell_lef_paths = {twoBucketLef(), dffSeqLef()};
   spec.num_insts = 50;
+  spec.sequential_ratio = 0.1;  // DFFSYN from dff_seq.lef fills the class
   // Weight only on buckets 2 (index 0) and 4 (index 2), both populated.
   spec.combinational_pin_distribution = std::array<double, 5>{50, 0, 50, 0, 0};
   EXPECT_GT(generateSynthetic(nb, spec), 0);
@@ -416,16 +432,21 @@ TEST(StatisticalMixTest, ModeBSyntheticMeanMatchesTarget)
   NetlistBuilder nb;
   SyntheticNetlistSpec spec;
   spec.num_insts = 10000;
+  spec.sequential_ratio = 0.1;  // Stage D: mandatory > 0
   spec.target_avg_fanout = 3.5;
   spec.seed = 21;
   ASSERT_GT(generateSynthetic(nb, spec), 0);
 
   // target_avg_fanout is a fanout (signal pins minus the one driver pin), so
-  // the mean fanout — not the mean pin count — should match the target. All
-  // instances here are single-output combinational (no sequential_ratio).
+  // the mean fanout — not the mean pin count — should match the target. The
+  // target governs the COMBINATIONAL mix only, so sequential instances (the
+  // fixed 3-pin SEQ representative) are excluded from the mean.
   long pins = 0;
   int n = 0;
   for (odb::dbInst* inst : nb.block()->getInsts()) {
+    if (isSequentialMaster(inst->getMaster())) {
+      continue;
+    }
     pins += signalPinCount(inst->getMaster());
     ++n;
   }

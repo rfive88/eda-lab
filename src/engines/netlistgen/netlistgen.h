@@ -1,4 +1,4 @@
-// eda-lab: programmatic netlist construction (Phase 0, Stage B).
+// eda-lab: programmatic netlist construction (Phase 0, Stage D).
 //
 // Builds a dbBlock through OpenDB API calls so tests and benchmarks can
 // construct netlists of any size with exactly known or statistically
@@ -25,9 +25,18 @@
 //         Works over synthetic representative masters or over LEF-loaded
 //         cells classified by signal-pin count.
 //
-// Stage B does NOT yet guarantee combinational-loop freedom — net formation
-// still pairs drivers and sinks from shuffled pools, so cycles are possible.
-// Provably-acyclic net formation lands in Stage C. See README.md / FLOW.md.
+// Stage D: statistical-mix net formation is combinational-loop-free BY
+// CONSTRUCTION. Instance creation order doubles as a topological (DAG) order:
+// a combinational output may only drive sequential-instance inputs (any
+// index) or combinational-instance inputs created LATER in the order, so
+// every comb->comb edge goes strictly forward and no combinational cycle can
+// form. Sequential (Q) outputs are unconstrained drivers (the loop-breaker);
+// sequential inputs (D/CK) are unconstrained sinks (feedback through a
+// register is legitimate, not combinational). This requires
+// sequential_ratio > 0 in statistical mode (fail-fast) until Stage E adds
+// primary-input ports as an alternate bootstrap source. The legacy weighted
+// mix (Stage A path) keeps its original shuffled-pool net formation and
+// makes no acyclicity guarantee. See README.md / FLOW.md.
 
 #pragma once
 
@@ -108,8 +117,8 @@ class NetlistBuilder
   // All masters across every loaded library (synthetic or LEF-backed).
   std::vector<odb::dbMaster*> masters() const;
 
-  // Auto-computed die bounding box (Stage D's DEF writer will consume it;
-  // this stage only records it on the block). lx/ly are 0; ux/uy size a
+  // Auto-computed die bounding box (the DEF writer consumes it for DIEAREA;
+  // recorded on the block). lx/ly are 0; ux/uy size a
   // near-square placement region for num_insts cells at the given target
   // utilisation, using the loaded tech's site pitch when available and a
   // nominal pitch otherwise. Instances remain UNPLACED.
@@ -176,7 +185,11 @@ struct SyntheticNetlistSpec
   // must be present (combinational_pin_distribution XOR target_avg_fanout).
   //
   // Fraction of instances that are sequential; the rest are combinational.
-  // Defaults to 0.0 when engaged but unset (0.0 is valid this stage).
+  // MUST be set > 0 when the statistical mix is engaged (unset counts as 0
+  // and fails validation): sequential Q outputs are the only bootstrap
+  // signal source for the acyclic net formation until Stage E adds primary
+  // input ports. Stage E relaxes this back to "sequential_ratio > 0 OR
+  // primary_input_count > 0".
   std::optional<double> sequential_ratio;
   // Mode A (forward): percentages across the five pin-count buckets
   // [2, 3, 4, 5, 6+], which must sum to 100.
@@ -236,7 +249,9 @@ bool isClockGateMaster(odb::dbMaster* master);
 
 // Config-only spec validation (everything that does not depend on a loaded
 // LEF library): mutual exclusivity of the two combinational modes, the
-// distribution summing to 100, sequential_ratio in [0, 1], and
+// distribution summing to 100, sequential_ratio in (0, 1] (strictly positive
+// since Stage D — the acyclic net formation needs sequential Q outputs as
+// its bootstrap signal source until Stage E adds primary inputs), and
 // target_avg_fanout strictly inside the synthetic fanout range (1, 5). Logs the
 // first problem via `logger` (if non-null) and returns false. Returns true
 // for legacy-mode specs (they are validated by generateSynthetic itself).

@@ -96,6 +96,18 @@ target_link_libraries(netlistgen_stagec_test PRIVATE netlistgen_cli_core
                                                      GTest::gtest_main)
 add_dependencies(netlistgen_stagec_test netlistgen_cli)
 
+# Stage D: combinational-loop freedom of the statistical net formation, the
+# sequential_ratio > 0 bootstrap validation, the thin-pool loosening behavior,
+# and a CLI round-trip confirming written DEF output is loop-free.
+add_executable(netlistgen_staged_test test/netlistgen_staged_test.cpp)
+target_compile_definitions(netlistgen_staged_test
+                           PRIVATE EDA_LAB_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+                                   NETLISTGEN_CLI_BIN="$<TARGET_FILE:netlistgen_cli>")
+target_link_libraries(netlistgen_staged_test PRIVATE netlistgen hypergraph odb
+                                                     utl GTest::gtest
+                                                     GTest::gtest_main)
+add_dependencies(netlistgen_staged_test netlistgen_cli)
+
 add_executable(fm_partitioner_test test/fm_partitioner_test.cpp)
 target_compile_definitions(fm_partitioner_test
                            PRIVATE EDA_LAB_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
@@ -134,6 +146,7 @@ add_test(NAME netlistgen_test COMMAND netlistgen_test)
 add_test(NAME netlistgen_stageb_test COMMAND netlistgen_stageb_test)
 add_test(NAME netlistgen_link_smoke COMMAND netlistgen_link_smoke)
 add_test(NAME netlistgen_stagec_test COMMAND netlistgen_stagec_test)
+add_test(NAME netlistgen_staged_test COMMAND netlistgen_staged_test)
 add_test(NAME fm_partitioner_test COMMAND fm_partitioner_test)
 add_test(NAME cli_help_test COMMAND cli_help_test)
 add_test(NAME error_handling_test COMMAND error_handling_test)

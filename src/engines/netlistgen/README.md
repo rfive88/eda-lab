@@ -5,25 +5,31 @@ calls — optionally backed by real LEF cells — so tests and benchmarks can
 create netlists of any size with exactly known or statistically controlled
 topology, then feed them to `Hypergraph::buildFromBlock()`.
 
-> **Migration status (Stage D of 5 — "Phase 1" complete).** Stage A promoted
-> `netlistgen` from a Stage 1/2 test utility into an engine and made pin
-> access IoType-based. Stage B added LEF-backed masters (real cells) and a
-> statistical cell mix (forward + max-entropy modes). Stage C added DEF /
-> `.odb` writers, a net well-formedness validation pass, and a standalone
-> JSON-driven CLI executable (`netlistgen_cli`). **Stage D (this stage)**
-> makes statistical-mix net formation **combinational-loop-free by
-> construction** (see "Combinational-loop avoidance" below), which completes
-> Phase 1: generated DEF / `.odb` output is now genuinely valid — well-formed
-> *and* acyclic — and ready to serve as Stage 3 benchmark fixtures. Still
-> landing later:
-> - **Stage E** — primary I/O ports and a Verilog writer (and relaxation of
->   the `sequential_ratio > 0` requirement below).
+> **Migration status (Stage E1 of 5+ — "Phase 1" complete since Stage D).**
+> Stage A promoted `netlistgen` from a Stage 1/2 test utility into an engine
+> and made pin access IoType-based. Stage B added LEF-backed masters (real
+> cells) and a statistical cell mix (forward + max-entropy modes). Stage C
+> added DEF / `.odb` writers, a net well-formedness validation pass, and a
+> standalone JSON-driven CLI executable (`netlistgen_cli`). Stage D made
+> statistical-mix net formation **combinational-loop-free by construction**
+> (see "Combinational-loop avoidance" below), completing Phase 1: generated
+> DEF / `.odb` output is genuinely valid — well-formed *and* acyclic. **Stage
+> E1 (this stage, `docs/briefs/spike-netlistgen-E1-io-rent.md`)** adds
+> primary input/output port generation governed by **Rent's rule**
+> (see "Primary I/O generation (Stage E1)" below). Still landing later:
+> - **Stage E2** — structural Verilog output (a separate brief).
+>
+> Note: Stage E1 does **not** relax the `sequential_ratio > 0` bootstrap
+> requirement noted in earlier revisions of this doc — PI/PO ports are added
+> in a separate pass *after* Stage D's net formation completes and never
+> participate in its DAG bootstrap, so that requirement is unchanged.
 >
 > **Peak fanout sub-clusters** (`docs/briefs/
 > spike-netlistgen-peak-fanout-clusters.md`) landed on top of Stage D:
 > optional, additive-only congestion-hot-spot generation for validating
 > downstream metrics tooling (`hg_metrics`, not yet implemented in this
-> repo) — see "Peak fanout sub-clusters" below.
+> repo) — see "Peak fanout sub-clusters" below. Stage E1's sub-cluster Rent
+> statistics (Step 5) build directly on it.
 >
 > See `FLOW.md` for algorithmic flow diagrams.
 
@@ -210,6 +216,122 @@ cells" to "cluster has fewer **eligible** cells").
 background pick is automatic and never produces a duplicate sink or a
 stalled draw — the same swap-remove pool mechanics Stage D already uses.
 
+## Primary I/O generation (Stage E1)
+
+Optional primary-input (PI) / primary-output (PO) port generation, sized by
+**Rent's rule** (`T = k · Gᵖ`, `docs/briefs/spike-netlistgen-E1-io-rent.md`):
+runs as a separate pass, directly on the already-formed `dbBlock`, once
+`formNetsAcyclic` (Stage D) completes — **not** a change to net formation
+itself, and it requires the statistical mix (boundary buffer/FF cells reuse
+its already-resolved representative masters, same requirement as peak
+fanout sub-clusters). Engaged only when **both** `rent_k` and `rent_p` are
+set (exactly one alone is a validation error).
+
+- **Step 1 — target terminal count.** `G` = `spec.num_insts` (internal
+  instances only, boundary cells not yet created). `T = round(k · Gᵖ)`;
+  `T_in = round(T · io_input_ratio)` PIs, `T_out = T − T_in` POs.
+- **Step 2 — random boundary sampling.** The full post-Stage-D net list is
+  shuffled with the shared seeded RNG and sliced into disjoint `pi_nets` /
+  `po_nets`. If `T_in + T_out` exceeds the net count (small designs), `T` is
+  capped at the net count and a warning is logged (`E1: T (...) exceeds net
+  count (...); capping at net count`) — no crash, no stall.
+- **Step 3 — pin type + boundary cell insertion**, sampled independently per
+  net from `io_pin_type_distribution` (combinational / buffered /
+  registered). Buffer/FF cells reuse the statistical mix's first non-empty
+  combinational bucket and its sequential class (the latter guaranteed
+  non-empty by Stage D's `sequential_ratio > 0` bootstrap rule) — works
+  identically in synthetic and LEF mode, no extra master-sourcing logic.
+  Naming continues the existing `u<i>`/`n<i>` sequences; **planes, not
+  names**, distinguish a boundary cell from an internal one (same
+  philosophy as `hgm.is_boundary_reg` vs. internal registers).
+- **Step 5 — sub-cluster (+ background) Rent stats**, when the peak
+  fanout sub-cluster feature is also engaged: per cluster, `G_c` = original
+  internal instances in the cluster (boundary buf/FF cells excluded, same
+  exclusion `G`/`G_actual` already apply), `T_c` = its cut nets (an
+  instance-owned endpoint's cluster is looked up positionally in
+  `cluster_id`; a connected `dbBTerm`, or a boundary buf/FF instance created
+  by this same pass, always counts as "outside every cluster" — both are,
+  definitionally, boundary/external). `G_c < 2` or `T_c < 1` is degenerate
+  and skipped (logged). Background mirrors this with `cluster_id == -1`,
+  plus nets entirely inside the background that reach a PI/PO bTerm.
+- **Step 6 — actual Rent for the full design**: `p_actual = log(T_actual) /
+  log(G)`, `k_actual = T_actual / G^p_actual`. Note this formula (the
+  brief's own, and reused identically for `p_c`/`k_c` and `p_bg`/`k_bg`) is
+  **tautological in `k`**: because `p` is defined as exactly the exponent
+  that makes `Gᵖ = T`, `k = T / Gᵖ` is **always 1.0** for any `(T, G)`. This
+  isn't a bug — the *actual p* is the informative number here; the reported
+  `k_actual`/`k_c`/`k_bg` are a faithful implementation of the brief's
+  literal formula, not evidence something is wrong.
+
+### Two deliberate deviations from a literal reading of the brief
+
+**1. A PI-selected net's existing driver is REPLACED, never "added
+alongside."** The brief's own pseudocode says a PI becomes "an additional
+driver" of a randomly-selected *existing* net — but every net Stage D forms
+already has exactly one committed internal driver, and this repo treats
+"exactly one driver per net" as a hard, enforced invariant
+(`validateNetlist`). Two drivers on one net is also not how real designs
+work: a net is driven either by a primary input or by an internal
+instance's output, never both (confirmed as the intended semantics before
+implementing). So for a PI net, the existing driver `dbITerm` is
+**disconnected** (freed, left unused — a harmless dangling pin) and the PI's
+`dbBTerm(INPUT)` becomes the net's sole driver; for **buffered**/
+**registered** PI, the new boundary cell's output pin takes over as the
+net's driver instead of a bare bTerm. A PO has no such conflict — its
+`dbBTerm(OUTPUT)` (or, for buffered/registered, the new cell's input pin) is
+simply one more sink/observer alongside the net's unchanged existing driver
+and sinks (nets already support arbitrary fanout). **This is why
+`netlist_validation.cpp` now folds `dbBTerm`s into its driver/sink tally**
+(an `INPUT` bTerm counts as a driver, `OUTPUT`/`INOUT` as a sink) — additive
+and symmetric with the existing `dbITerm` rule (a net with no bterms, i.e.
+every net before this stage, tallies identically to before); this was
+already the documented "Stage E can fold primary-input/-output dbBTerms
+into the same driver/sink counts" extension point left in
+`netlist_validation.h` since Stage C.
+
+**2. netlistgen never touches the Hypergraph engine.** The brief's
+pseudocode calls `hg.add_vertex()` / `hg.set_bool_attr(vertex, name, true)`
+— but the real `eda::Hypergraph` has no incremental mutation API at all:
+vertices are strictly `dbInst`s assigned fresh at `buildFromBlock()` time,
+and every attribute plane is destroyed on rebuild (see
+`src/hypergraph/hypergraph.h`). A bare (combinational) PI/PO port has no
+backing `dbInst` in the first place, so it structurally cannot be a
+"vertex" in this codebase's model. Rather than inventing a synthetic
+instance purely to hang a plane on, or giving `netlistgen` a new,
+previously-nonexistent dependency on the `Hypergraph` engine (its
+"Input / output contract" has always been "no hypergraph attribute planes
+read or written" — true since Stage A, unbroken by this stage too),
+`generateSynthetic`'s optional `out_rent_stats` parameter (`RentStats`)
+returns the raw artifacts a caller needs to build the planes itself, once
+it has its own `Hypergraph::buildFromBlock()`:
+
+| Plane (brief's name) | Realized as | Source in `RentStats` |
+|---|---|---|
+| `hgm.is_pi` | **hyperedge** (net) bool plane — a port is a property of the net it terminates, and has no vertex of its own | `pi_nets` (`vector<dbNet*>`) |
+| `hgm.is_po` | hyperedge bool plane | `po_nets` (`vector<dbNet*>`) |
+| `hgm.is_boundary_buf` | **vertex** bool plane — these are real `dbInst`s | `boundary_buf_insts` (`vector<dbInst*>`) |
+| `hgm.is_boundary_reg` | vertex bool plane | `boundary_reg_insts` (`vector<dbInst*>`) |
+
+`test/netlistgen_rent_test.cpp` demonstrates the exact translation
+(`applyRentPlanes`) and verifies all four planes end up populated correctly
+— the plane *names and semantics* the brief specifies are fully realized,
+just assembled by the caller (or a future `hg_metrics` consumer) rather than
+by `netlistgen` itself.
+
+### JSON / spec fields
+
+All optional; E1 activates only when **both** `rent_k` and `rent_p` are set.
+
+| Field | Maps to | Rule |
+|-------|---------|------|
+| `rent_k` | `spec.rent_k` | Must be `> 0`. |
+| `rent_p` | `spec.rent_p` | `(0, 1.0]` used as given; `(1.0, 1.2]` accepted but **warned + clamped to 1.0** for `T_target` (degenerate but tolerable); `> 1.2` is a hard error. |
+| `io_input_ratio` | `spec.io_input_ratio` | Optional, `(0, 1)`; defaults to `0.60`. |
+| `io_pin_type_distribution` | `spec.io_pin_type_distribution` | Optional object `{"combinational", "buffered", "registered"}`; each fraction in `[0, 1]`, sum `1.0 ± 0.01` (normalised silently if within tolerance but not exact); defaults to `{0.70, 0.20, 0.10}`. |
+
+`rent_k`/`rent_p` set on an otherwise-legacy (weighted-`masters`) spec is a
+validation error, same treatment as `peak_avg_fanout`.
+
 ## Statistical cell-mix contract
 
 - **Pin counting excludes power/ground.** `signalPinCount(master)` counts
@@ -364,6 +486,10 @@ never into the `netlistgen` library). The schema is a serialization of
 | `peak_avg_fanout` | `spec.peak_avg_fanout` | Optional; engages peak fanout sub-clusters (see below). Must be `>` `(min_fanout + max_fanout) / 2`. |
 | `peak_cluster_pct` | `spec.peak_cluster_pct` | Optional, `(0, 1)`; defaults to `0.10`. Ignored if `peak_avg_fanout` absent. |
 | `num_peak_clusters` | `spec.num_peak_clusters` | Optional, `>= 1`; defaults to `1`. Ignored if `peak_avg_fanout` absent. |
+| `rent_k` | `spec.rent_k` | Optional; engages Stage E1 (with `rent_p`). Must be `> 0`. |
+| `rent_p` | `spec.rent_p` | Optional; engages Stage E1 (with `rent_k`). `(0, 1.2]`; `(1.0, 1.2]` warns + clamps to 1.0. |
+| `io_input_ratio` | `spec.io_input_ratio` | Optional, `(0, 1)`; defaults to `0.60`. Ignored if `rent_k`/`rent_p` absent. |
+| `io_pin_type_distribution` | `spec.io_pin_type_distribution` | Optional object `{"combinational","buffered","registered"}`, sum `1.0 ± 0.01`. Ignored if `rent_k`/`rent_p` absent. |
 | `output_def_path` | CLI-only | Write DEF here if set. |
 | `output_odb_path` | CLI-only | Write `.odb` here if set. |
 
@@ -457,13 +583,21 @@ until it calls `setDebugLevel` (or `eda::applyVerbosity`) on the shared logger.
 ## Input / output contract
 
 Standalone in-memory library: **no hypergraph attribute planes** read or
-written. Input is a `SyntheticNetlistSpec`; output is a populated `dbBlock`
-owned by the `NetlistBuilder`, plus the net count (or `-1` on invalid spec).
-Consumed downstream by `Hypergraph::buildFromBlock()`. `generateSynthetic`
-also takes an optional trailing `std::vector<int>* out_cluster_id = nullptr`
-— when non-null and peak fanout sub-clusters are engaged, it is filled with
-per-instance cluster membership; this is generation-time bookkeeping for
-tests only and is never itself part of the `dbBlock`/`Hypergraph` model.
+written — still true as of Stage E1 (see "Primary I/O generation (Stage E1)"
+above for why that boundary held even though the brief's own pseudocode
+assumes otherwise). Input is a `SyntheticNetlistSpec`; output is a populated
+`dbBlock` owned by the `NetlistBuilder`, plus the net count (or `-1` on
+invalid spec). Consumed downstream by `Hypergraph::buildFromBlock()`.
+`generateSynthetic` also takes two optional trailing out-parameters, each
+`nullptr` by default so every pre-existing call site is unaffected:
+- `std::vector<int>* out_cluster_id` — filled with per-instance cluster
+  membership when peak fanout sub-clusters are engaged; generation-time
+  bookkeeping never itself part of the `dbBlock`/`Hypergraph` model.
+- `RentStats* out_rent_stats` — filled with Stage E1's statistics and
+  generated artifacts (target/actual Rent parameters, pin-type counts, the
+  raw `dbNet*`/`dbInst*` lists a caller needs to build `hgm.is_pi` /
+  `is_po` / `is_boundary_buf` / `is_boundary_reg` planes itself) when
+  `rent_k`/`rent_p` are engaged.
 
 ## Control parameters (`SyntheticNetlistSpec`)
 
@@ -483,8 +617,14 @@ tests only and is never itself part of the `dbBlock`/`Hypergraph` model.
 | `peak_avg_fanout` | `std::optional<double>` | unset | Engages peak fanout sub-clusters; target mean fanout for intra-cluster nets. Must be `>` `(min_fanout + max_fanout) / 2`. Requires the statistical mix. |
 | `peak_cluster_pct` | `std::optional<double>` | unset (→ `0.10` when engaged) | Fraction of instances in peak clusters. Must be in `(0, 1)` if set. Ignored if `peak_avg_fanout` unset. |
 | `num_peak_clusters` | `std::optional<int>` | unset (→ `1` when engaged) | Number of peak clusters. Must be `>= 1` if set. Ignored if `peak_avg_fanout` unset. |
+| `rent_k` | `std::optional<double>` | unset | Engages Stage E1 (with `rent_p`); Rent coefficient. Must be `> 0`. Requires the statistical mix. |
+| `rent_p` | `std::optional<double>` | unset | Engages Stage E1 (with `rent_k`); Rent exponent. `(0, 1.2]`; `(1.0, 1.2]` warns + clamps to 1.0 for `T_target`. |
+| `io_input_ratio` | `std::optional<double>` | unset (→ `0.60` when engaged) | Fraction of `T` assigned as PIs. Must be in `(0, 1)` if set. Ignored if `rent_k`/`rent_p` unset. |
+| `io_pin_type_distribution` | `std::optional<IoPinTypeDistribution>` | unset (→ `{0.70, 0.20, 0.10}` when engaged) | Pin-type split (combinational/buffered/registered), sum `1.0 ± 0.01`. Ignored if `rent_k`/`rent_p` unset. |
 
 `MasterSpec`: `name`, `num_inputs` (2), `num_outputs` (1), `weight` (1.0).
+`IoPinTypeDistribution`: `combinational` (0.70), `buffered` (0.20),
+`registered` (0.10).
 
 The statistical mix is engaged when `tech_lef_path`, `sequential_ratio`,
 `combinational_pin_distribution`, or `target_avg_fanout` is set
@@ -550,7 +690,7 @@ if (eda::validateNetlist(nb.block()).ok) {     // structural well-formedness
 cmake -B build
 cmake --build build --target netlistgen_test netlistgen_stageb_test \
       netlistgen_stagec_test netlistgen_staged_test netlistgen_peak_cluster_test \
-      netlistgen_link_smoke netlistgen_cli
+      netlistgen_rent_test netlistgen_link_smoke netlistgen_cli
 ctest --test-dir build -R "netlistgen" --output-on-failure
 ```
 
@@ -595,24 +735,48 @@ ctest --test-dir build -R "netlistgen" --output-on-failure
   `num_peak_clusters=0`, legacy-mix rejection) plus the "ignored when
   `peak_avg_fanout` absent" rule; and the `num_peak_clusters`/`peak_cluster_pct`
   defaults.
+- `test/netlistgen_rent_test.cpp` — Stage E1 (no data files needed; links
+  `hypergraph` too, since the test performs the plane translation
+  `netlistgen` itself deliberately doesn't — see "Primary I/O generation
+  (Stage E1)" above): no-E1-params leaves `RentStats.engaged` false and
+  every `hgm.*` plane absent; a basic 2000-inst run (`T_target`/`T_actual`
+  within tolerance, PI/PO split matching `io_input_ratio`, `hgm.is_pi`/
+  `is_po`/`is_boundary_buf`/`is_boundary_reg` all populated correctly via
+  `applyRentPlanes`, `is_boundary_reg` never set on an internal FF,
+  `p_actual` finite and positive); a custom `io_input_ratio`; an
+  all-combinational `io_pin_type_distribution` producing zero boundary
+  cells; combining with peak fanout sub-clusters (per-cluster + background
+  Rent stats, a non-asserting soft check that cluster `p_c` tends above
+  background `p_bg`); all validation failures (exactly-one-of
+  `rent_k`/`rent_p`, `rent_p > 1.2`, the `(1.0, 1.2]` warn-and-clamp case,
+  bad `io_pin_type_distribution` sum, out-of-range `io_input_ratio`,
+  legacy-mix rejection); and a small-design `T`-capping run that completes
+  without crashing.
 - `test/netlistgen_link_smoke.cpp` — library-linkage guard.
 
 Scale reference: ~500k insts / ~1.4M pins generate in about 2 s (synthetic).
 
 ## Open questions / follow-on
 
-- **Stage E (not yet implemented)** — primary I/O ports (`PINS` section,
-  primary-input `dbBTerm` drivers / primary-output `dbBTerm` sinks folded into
-  `validateNetlist`) and a Verilog writer, plus `output_verilog_path` and
-  primary-port fields on the CLI config; relaxes the Stage D
-  `sequential_ratio > 0` requirement to "sequential_ratio > 0 OR
-  `primary_input_count` > 0".
+- **Stage E2 (not yet implemented)** — structural Verilog output
+  (`output_verilog_path`), a separate brief. Note this repo's Stage E1 does
+  **not** relax `sequential_ratio > 0` the way an earlier revision of this
+  doc predicted ("... OR `primary_input_count > 0`") — PI/PO generation
+  turned out to run as a pass *after* Stage D's DAG formation rather than
+  participating in its bootstrap, so that requirement stands unchanged;
+  Stage E2 (or a future revision of this note) should reassess.
 - Custom prior distribution for Mode B's max-entropy tilt (currently uniform).
 - YAML config support alongside JSON.
 - Peak fanout sub-clusters: no LEF-mode-specific test coverage yet (the
   mechanism is LEF-agnostic — it only touches `dbITerm`/`dbInst`, not master
   origin — but the test suite currently only exercises synthetic mode); no
   inter-cluster bias (clusters never preferentially wire to each other, only
-  to their own members or the shared background); `hg_metrics` itself (the
-  downstream consumer this feature exists for) is not yet implemented in
-  this repo.
+  to their own members or the shared background).
+- Stage E1: no LEF-mode-specific test coverage yet (same LEF-agnostic
+  argument as peak clusters — it only touches `dbITerm`/`dbBTerm`/`dbInst`).
+  (`writeDef`'s generic `odb::DefOut` serializer already emits a correct
+  `PINS` section for the new `dbBTerm`s with no code changes — verified
+  manually: a Stage E1 DEF round-trips its ports with correct name / net /
+  direction. No pin placement/geometry, since these bTerms carry none.)
+  `hg_metrics` itself (the downstream consumer both this feature and peak
+  fanout sub-clusters exist for) is not yet implemented in this repo.

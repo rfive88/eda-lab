@@ -9,18 +9,20 @@ function `generateSynthetic()`, which fills a builder's block from a
 and a driver: the DEF / `.odb` writers (`netlist_writers.h/.cpp`), the net
 well-formedness check (`netlist_validation.h/.cpp`), and a standalone
 JSON-driven CLI (`cli_config.h/.cpp`, `netlistgen_cli.cpp`). This reflects the
-code as of Stage D (LEF-backed generation + statistical cell mix + max-entropy
-solve + writers + validation + CLI + acyclic net formation).
+code as of Stage E1 (LEF-backed generation + statistical cell mix +
+max-entropy solve + writers + validation + CLI + acyclic net formation + peak
+fanout sub-clusters + primary I/O generation via Rent's rule).
 
 **Combinational-loop freedom (Stage D).** Statistical-mix net formation is
 **acyclic by construction**: `formNetsAcyclic` reuses the instance creation
 index as a topological order and filters receiver eligibility so every
 comb→comb edge goes strictly forward (see its section below). This requires
 `sequential_ratio > 0` (fail-fast in `validateSpecConfig`) — sequential Q
-outputs bootstrap the combinational DAG until Stage E adds primary-input
-ports. The legacy weighted mix keeps the original shuffled-pool `formNets`
-and makes no acyclicity guarantee. Primary I/O ports and a Verilog writer
-are **Stage E**.
+outputs bootstrap the combinational DAG; **this is unaffected by Stage E1**
+(below) since primary I/O ports run as a separate pass after formation
+completes, never participating in the DAG bootstrap. The legacy weighted mix
+keeps the original shuffled-pool `formNets` and makes no acyclicity
+guarantee.
 
 **Peak fanout sub-clusters** (optional, layered on Stage D — see its own
 section below): `assignPeakClusters` groups a subset of instances into
@@ -31,27 +33,49 @@ already treats as eligible** — so cluster preference can bias *which*
 eligible receiver is picked, never make an ineligible one eligible, and the
 DAG/loop-freedom guarantee above is completely unaffected.
 
+**Primary I/O generation via Rent's rule (Stage E1)**, `applyPrimaryIoStageE1`
+— a separate pass over the already-formed `dbBlock`, run once
+`formNetsAcyclic` returns (see its own section below). Sizes a target PI/PO
+terminal count from `T = k·Gᵖ`, randomly samples that many nets to become
+boundary-visible, and inserts combinational/buffered/registered pin types.
+The one hard invariant this pass must preserve — "exactly one driver per
+net" (`validateNetlist`, now `dbBTerm`-aware) — is why a PI **replaces**
+its selected net's existing driver rather than being added "alongside" it
+(see the section below for the full rationale); a PO has no such conflict
+(one more sink/observer on an already-driven net is always fine). Reuses
+Stage E1's already-assigned `cluster_id` (if peak fanout sub-clusters are
+also engaged) for per-cluster + background Rent statistics. `netlistgen`
+never touches the `Hypergraph` engine (unchanged since Stage A) — Stage E1
+returns raw `dbNet*`/`dbInst*` lists via `RentStats` instead of hypergraph
+planes; see its section below.
+
 ## `netlistgen.h` — API surface
 
 Declares the two layers, the spec structs, and the shared statistical-mix
 helpers (`signalPinCount`, `isSequentialMaster`, `validateSpecConfig`,
-`maxEntropyDistribution`). No logic in the header.
+`maxEntropyDistribution`, `assignPeakClusters`). No logic in the header.
 
 ```mermaid
 graph TD
   subgraph Types
     MS[MasterSpec<br/>legacy weighted mix]
-    SP[SyntheticNetlistSpec<br/>num_insts / fanout / seed<br/>tech_lef_path / cell_lef_paths<br/>sequential_ratio<br/>combinational_pin_distribution OR target_avg_fanout<br/>distribution_tolerance_pct]
+    IOD[IoPinTypeDistribution<br/>combinational / buffered / registered]
+    SP[SyntheticNetlistSpec<br/>num_insts / fanout / seed<br/>tech_lef_path / cell_lef_paths<br/>sequential_ratio<br/>combinational_pin_distribution OR target_avg_fanout<br/>distribution_tolerance_pct<br/>peak_avg_fanout / peak_cluster_pct / num_peak_clusters<br/>rent_k / rent_p / io_input_ratio / io_pin_type_distribution]
     MS -->|"vector<MasterSpec>"| SP
+    IOD -->|"optional"| SP
+    CRS[ClusterRentStats]
+    RS[RentStats<br/>target+actual Rent, pin-type counts,<br/>pi_nets/po_nets/boundary_*_insts,<br/>cluster_rent / background]
+    CRS -->|"vector"| RS
   end
   subgraph API
     NB[class NetlistBuilder<br/>makeMaster / makeInst / makeNet / connect<br/>loadLef / masters / estimateDieArea<br/>block / db / logger]
-    GS["generateSynthetic(builder, spec) -> int<br/>(-1 on invalid spec)"]
-    H[helpers: signalPinCount<br/>isSequentialMaster<br/>validateSpecConfig<br/>maxEntropyDistribution]
+    GS["generateSynthetic(builder, spec,<br/>out_cluster_id?, out_rent_stats?) -> int<br/>(-1 on invalid spec)"]
+    H[helpers: signalPinCount<br/>isSequentialMaster<br/>validateSpecConfig<br/>maxEntropyDistribution<br/>assignPeakClusters]
   end
   SP -->|input| GS
   NB -->|populated by| GS
   H -->|used by| GS
+  GS -.->|"optional out-params"| RS
 ```
 
 ## `netlistgen.cpp` — `NetlistBuilder`
@@ -167,7 +191,9 @@ source that can start the combinational DAG until Stage E's primary inputs.
 
 `buildPlan` resolves the per-bucket master lists, anchors, and probabilities,
 validating LEF buckets. `generateStatistical` then rolls each instance and
-finishes with `formNets` and the post-generation tolerance check.
+finishes with `formNetsAcyclic` (Stage D), the post-generation tolerance
+check, and — if `rent_k`/`rent_p` are set — `applyPrimaryIoStageE1`
+(Stage E1).
 
 ```mermaid
 graph TD
@@ -191,11 +217,14 @@ graph TD
   okplan --> gen["for each of num_insts:<br/>roll seq vs comb (sequential_ratio)<br/>comb: pick_bucket then uniform master<br/>makeInst"]
   gen --> fn2["formNetsAcyclic (Stage D)"]
   fn2 --> tol["empirical seq ratio / bucket shares /<br/>Mode-B mean vs targets<br/>-> warn if beyond tolerance (never fail)"]
+  tol --> e1["applyPrimaryIoStageE1(plan, cluster_id)<br/>(no-op unless rent_k/rent_p set)"]
+  e1 --> ret2["return nets_made<br/>(+ out_cluster_id / out_rent_stats if requested)"]
 ```
 
 The cell mix is decided entirely before net formation, so Stage D's ordered
 formation cannot disturb the empirical proportions the tolerance check
-measures.
+measures; Stage E1 runs even later still (after that check), so it cannot
+disturb them either.
 
 ## `netlistgen.cpp` — `formNets()` (legacy path only)
 
@@ -328,6 +357,57 @@ computation itself (`seq_pool` / `comb_active` / `comb_retired`,
 `takeFromActive`, the retirement step) is completely unmodified by
 clustering.
 
+## `netlistgen.cpp` — `applyPrimaryIoStageE1()` (Stage E1, optional)
+
+Runs once, called from `generateStatistical` right after `formNetsAcyclic`
+returns — a separate pass over the already-formed `dbBlock`, not a change to
+net formation. No-op (`RentStats{}`, `engaged = false`) unless
+`spec.rent_k`/`spec.rent_p` are both set (`validateSpecConfig` already
+enforced both-or-neither, `rent_k > 0`, `rent_p` in `(0, 1.2]` with the
+`(1.0, 1.2]` warn-and-clamp case).
+
+```mermaid
+graph TD
+  chk{"rent_k and rent_p both set?"} -->|no| noop["return RentStats{} (engaged=false)"]
+  chk -->|yes| t1["Step 1: G=spec.num_insts<br/>p_eff=min(rent_p,1.0)<br/>T=round(rent_k * G^p_eff)"]
+  t1 --> t2["Step 2: net_list = block.getNets(); shuffle(rng)<br/>T_in=round(T*io_input_ratio); T_out=T-T_in"]
+  t2 --> cap{"T_in+T_out > net_list.size()?"}
+  cap -->|yes| warn["warn 'E1: T (..) exceeds net count (..); capping'<br/>T_capped=net_list.size(); recompute T_in/T_out"]
+  cap -->|no| slice
+  warn --> slice["pi_nets = net_list[0..T_in)<br/>po_nets = net_list[T_in..T_in+T_out)"]
+  slice --> pi["Step 3 (PI): for each pi net,<br/>disconnect its existing driver ITerm first,<br/>then sample pin type"]
+  pi --> po["Step 3 (PO): for each po net,<br/>sample pin type (existing driver untouched)"]
+  po --> s6["Step 6: p_actual=log(T_actual)/log(G)<br/>k_actual=T_actual/G^p_actual (always 1.0 — see README)"]
+  s6 --> s5{"has_any_cluster(cluster_id)?"}
+  s5 -->|no| ret["return stats"]
+  s5 -->|yes| clu["Step 5: per-cluster G_c/T_c (skip if degenerate)<br/>+ background G_bg/T_bg (skip if degenerate)"]
+  clu --> ret
+```
+
+**Step 3 pin-type dispatch**, identical branch structure for PI and PO
+(the only difference is which side of the net changes):
+
+```mermaid
+graph TD
+  net["net (already selected)"] --> piq{"PI or PO?"}
+  piq -->|PI| dis["disconnect net's existing driver ITerm<br/>(freed, left unused)"]
+  piq -->|PO| samp
+  dis --> samp["kind = pick_pin_type(rng)<br/>(discrete_distribution over normalised<br/>io_pin_type_distribution)"]
+  samp --> comb{"kind"}
+  comb -->|combinational| c1["PI: bTerm(net, INPUT) — net's sole driver now<br/>PO: bTerm(net, OUTPUT) — one more sink/observer"]
+  comb -->|buffered| c2["reuse first non-empty plan.comb[] master<br/>PI: buf.out -> net (replaces driver); feed-net: bTerm(IN) -> buf.in<br/>PO: buf.in -> net (extra sink); feed-net: buf.out -> bTerm(OUT)"]
+  comb -->|registered| c3["reuse plan.seq[0] master (guaranteed non-empty)<br/>PI: ff.Q -> net (replaces driver); feed-net: bTerm(IN) -> ff.D<br/>PO: ff.D -> net (extra sink); feed-net: ff.Q -> bTerm(OUT)"]
+```
+
+`firstOutputIterm`/`firstDataInputIterm` locate a reused master's driver pin
+and its first non-clock data input by IoType/SigType — never by pin name —
+matching the rest of this file's low-level `dbITerm` manipulation style
+(`isClockPinName` catches libraries like Nangate45 that tag `CK` `USE
+SIGNAL`, same fallback `isSequentialMaster` already relies on). New
+instances/nets continue the existing `u<i>`/`n<i>` naming sequences from the
+internal counts — planes (via `RentStats`, not names) are what distinguish a
+boundary cell from an internal one.
+
 ## Engine-level flow: spec → block → hypergraph
 
 End to end, netlistgen turns a declarative spec into a `dbBlock` (synthetic or
@@ -371,15 +451,20 @@ sequenceDiagram
   HG-->>Caller: hypergraph view
 ```
 
-## `netlist_validation.cpp` — well-formedness check (Stage C)
+## `netlist_validation.cpp` — well-formedness check (Stage C; bTerm-aware since Stage E1)
 
 `validateNetlist(block)` walks every `dbNet` and tallies its connected
-`dbITerm`s by IoType (power/ground skipped by `dbSigType`) via `tallyITerms`,
-returning on the first net that breaks a structural invariant. This is a
-distinct guarantee from Stage D's loop-freedom: a net can be perfectly
-well-formed and still sit on a combinational cycle. The tally struct is
-factored so Stage E can fold primary-input/-output `dbBTerm`s into the same
-driver/sink totals before the verdict.
+terminals by IoType (power/ground skipped by `dbSigType`) — `dbITerm`s via
+`tallyITerms`, and, since Stage E1, `dbBTerm`s via `tallyBTerms` (a `dbBTerm`
+with IoType `INPUT` counts as a driver — a primary input supplies the net
+from outside; `OUTPUT`/`INOUT` counts as a sink) — both feeding one shared
+`NetTally` before the verdict. This is a distinct guarantee from Stage D's
+loop-freedom: a net can be perfectly well-formed and still sit on a
+combinational cycle. Folding bTerms in here (rather than a parallel rule) is
+exactly why Stage E1's primary-input realization *replaces* a selected net's
+existing driver instead of adding the PI bTerm alongside it — see
+`netlist_validation.h` and the netlistgen README's "Primary I/O generation
+(Stage E1)" section.
 
 ```mermaid
 graph TD
@@ -387,7 +472,8 @@ graph TD
   nul -->|yes| okv["ok (nothing to check)"]
   nul -->|no| loop["for each dbNet"]
   loop --> tally["tallyITerms: for each iterm<br/>skip POWER/GROUND<br/>OUTPUT -> drivers<br/>INPUT/INOUT -> sinks<br/>++connected"]
-  tally --> c0{"connected == 0?"}
+  tally --> tallyb["tallyBTerms: for each bterm<br/>skip POWER/GROUND<br/>INPUT -> drivers<br/>OUTPUT/INOUT -> sinks<br/>++connected"]
+  tallyb --> c0{"connected == 0?"}
   c0 -->|yes| fdangle["fail: 'net dangling'"]
   c0 -->|no| d1{"drivers != 1?"}
   d1 -->|yes| fdrv["fail: 'N drivers (expected 1)'"]
@@ -400,8 +486,12 @@ graph TD
 ## `netlist_writers.cpp` — DEF / `.odb` output (Stage C)
 
 Two thin wrappers, callable independently of the CLI. `writeDef` drives
-`odb::DefOut` at version 5.8 (no PINS section — no primary ports until Stage E);
-it supplies a local `utl::Logger` when the caller passes none. `writeOdb` wraps
+`odb::DefOut` at version 5.8 — `netlistgen` never touches this file for
+Stage E1's `dbBTerm`s at all: `DefOut::writeBlock` is a generic ODB
+serializer that already emits a correct `PINS` section for whatever
+`dbBTerm`s exist on the block (verified manually against Stage E1 output; no
+pin placement/geometry, since these bTerms carry none); it supplies a local
+`utl::Logger` when the caller passes none. `writeOdb` wraps
 `dbDatabase::write`, which takes a `std::ostream`, in a checked `ofstream`.
 (Synthetic-tech DBUs are set to 2000/µm in `ensureSyntheticTech` so DefOut's
 def-units ÷ dbu-per-micron scaling is well-defined; LEF mode inherits real
@@ -463,19 +553,20 @@ graph TD
   rd -->|yes| parse["parseCliConfig(text)"]
   parse --> pok{"ok?"}
   pok -->|no| e1
-  pok -->|yes| gen["info: Generating...<br/>generateSynthetic(builder(&logger), spec)"]
+  pok -->|yes| gen["info: Generating...<br/>generateSynthetic(builder(&logger), spec,<br/>nullptr, &rent_stats)"]
   gen --> gok{"nets >= 0?"}
   gok -->|no| e1
   gok -->|yes| die["info: Generation complete (counts)<br/>estimateDieArea(num_insts)"]
   die --> vaw["info: Running validation<br/>validateAndWrite(builder, config, err)"]
-  vaw --> valid{"validateNetlist ok?"}
+  vaw --> valid{"validateNetlist ok?<br/>(bTerm-aware since Stage E1)"}
   valid -->|no| e1b["err 'validation failed'<br/>write nothing; return 1"]
   valid -->|yes| odir{"ensureOutputDir:<br/>create missing output dirs"}
   odir -->|create failed| e1c["err 'cannot create output directory'<br/>write nothing; return 1"]
   odir -->|ok| wdef["if output_def_path: writeDef (info: Wrote DEF)"]
   wdef --> wodb["if output_odb_path: writeOdb (info: Wrote .odb)"]
   wodb --> summ["reportDesignSummary (report):<br/>cells comb/seq · comb pin-count hist<br/>net count · avg fanout/net (driver excl)<br/>fanout hist (loads; 10-50 / &gt;50 bucketed)"]
-  summ --> counts["info: Done."]
+  summ --> summ2["reportPrimaryIoSummary (report):<br/>no-op unless rent_stats.engaged —<br/>target/actual Rent, pin-type counts,<br/>boundary FF count; + per-cluster/<br/>background Rent if clusters engaged"]
+  summ2 --> counts["info: Done."]
   counts --> ok0["return 0"]
 
   run -.->|any escaping std::exception| bck["main() catch-all:<br/>'Fatal error'; return 1"]
@@ -491,6 +582,8 @@ graph LR
     j3["fanout_range {min,max}"]
     j4["tech_lef_path / cell_lef_paths"]
     j5["sequential_ratio<br/>combinational_pin_distribution {2,3,4,5,6+}<br/>target_avg_fanout<br/>distribution_tolerance_pct"]
+    j7["peak_avg_fanout / peak_cluster_pct<br/>num_peak_clusters"]
+    j8["rent_k / rent_p / io_input_ratio<br/>io_pin_type_distribution<br/>{combinational,buffered,registered}"]
     j6["output_def_path / output_odb_path<br/>(CLI-only, >=1 required)"]
   end
   subgraph CliConfig
@@ -499,6 +592,8 @@ graph LR
     s3["spec.min_fanout / max_fanout"]
     s4["spec.tech_lef_path / cell_lef_paths"]
     s5["spec.sequential_ratio / ...dist / target / tol"]
+    s7["spec.peak_avg_fanout / peak_cluster_pct<br/>num_peak_clusters"]
+    s8["spec.rent_k / rent_p / io_input_ratio<br/>io_pin_type_distribution"]
     s6["config.output_def_path / output_odb_path"]
   end
   j1 --> s1
@@ -506,5 +601,7 @@ graph LR
   j3 --> s3
   j4 --> s4
   j5 --> s5
+  j7 --> s7
+  j8 --> s8
   j6 --> s6
 ```

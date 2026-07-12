@@ -147,6 +147,37 @@ bool parseCliConfig(const std::string& json_text,
       spec.num_peak_clusters = j.at("num_peak_clusters").get<int>();
     }
 
+    // ---- Stage E1: primary I/O generation via Rent's rule (optional) ----
+    if (j.contains("rent_k") && !j.at("rent_k").is_null()) {
+      spec.rent_k = j.at("rent_k").get<double>();
+    }
+    if (j.contains("rent_p") && !j.at("rent_p").is_null()) {
+      spec.rent_p = j.at("rent_p").get<double>();
+    }
+    if (j.contains("io_input_ratio") && !j.at("io_input_ratio").is_null()) {
+      spec.io_input_ratio = j.at("io_input_ratio").get<double>();
+    }
+    if (j.contains("io_pin_type_distribution")
+        && !j.at("io_pin_type_distribution").is_null()) {
+      const json& pt = j.at("io_pin_type_distribution");
+      if (!pt.is_object()) {
+        error = "'io_pin_type_distribution' must be an object keyed by "
+                "'combinational', 'buffered', 'registered'";
+        return false;
+      }
+      IoPinTypeDistribution dist;
+      if (pt.contains("combinational")) {
+        dist.combinational = pt.at("combinational").get<double>();
+      }
+      if (pt.contains("buffered")) {
+        dist.buffered = pt.at("buffered").get<double>();
+      }
+      if (pt.contains("registered")) {
+        dist.registered = pt.at("registered").get<double>();
+      }
+      spec.io_pin_type_distribution = dist;
+    }
+
     // ---- CLI-only I/O fields ----
     if (j.contains("output_def_path") && !j.at("output_def_path").is_null()) {
       out.output_def_path = j.at("output_def_path").get<std::string>();
@@ -298,6 +329,49 @@ void reportDesignSummary(odb::dbBlock* block, utl::Logger& logger)
   logger.report("==========================");
 }
 
+// Step 7 of Stage E1 (spike-netlistgen-E1-io-rent.md): append the Rent's-rule
+// summary (and, when peak fanout sub-clusters are also engaged, the
+// per-cluster + background Rent parameters) after the design summary above.
+// A no-op when Stage E1 wasn't engaged (`stats.engaged` false).
+void reportPrimaryIoSummary(const RentStats& stats, double sequential_ratio,
+                            utl::Logger& logger)
+{
+  if (!stats.engaged) {
+    return;
+  }
+  logger.report("");
+  logger.report("===== Primary I/O Summary =====");
+  logger.report("Target Rent:  k={:.3f}  p={:.3f}  ->  T_target={}",
+                stats.rent_k_target, stats.rent_p_target, stats.T_target);
+  if (stats.capped) {
+    logger.report("  (T_target exceeded the net count; capped — see the "
+                  "warning above)");
+  }
+  logger.report("Actual Rent:  k={:.3f}  p={:.3f}  ->  T_actual={}  (PI={}, "
+                "PO={})",
+                stats.k_actual, stats.p_actual, stats.T_actual, stats.T_in,
+                stats.T_out);
+  logger.report("Pin types:    combinational={}  buffered={}  registered={}",
+                stats.n_combinational, stats.n_buffered, stats.n_registered);
+  logger.report("Boundary FFs: {}  (tracked separately from internal "
+                "sequential_ratio={:.2f})",
+                stats.n_boundary_ff, sequential_ratio);
+
+  if (stats.has_clusters) {
+    logger.report("");
+    logger.report("===== Sub-cluster Rent Parameters =====");
+    for (const ClusterRentStats& cr : stats.cluster_rent) {
+      logger.report("Cluster {}:  G={}  T_c={}  k={:.3f}  p={:.3f}",
+                    cr.cluster_idx, cr.G_c, cr.T_c, cr.k_c, cr.p_c);
+    }
+    if (stats.background_valid) {
+      logger.report("Background:  G={}  T_bg={}  k={:.3f}  p={:.3f}",
+                    stats.G_bg, stats.T_bg, stats.k_bg, stats.p_bg);
+    }
+  }
+  logger.report("================================");
+}
+
 }  // namespace
 
 bool validateAndWrite(NetlistBuilder& builder,
@@ -366,7 +440,9 @@ int runCliFromFile(const std::string& config_path,
   NetlistBuilder builder("synth", &logger);
   logger.info(utl::UKN, kMsgGenerating, "Generating netlist: {} instances...",
               config.spec.num_insts);
-  const int nets = generateSynthetic(builder, config.spec);
+  RentStats rent_stats;
+  const int nets = generateSynthetic(builder, config.spec, /*out_cluster_id=*/
+                                     nullptr, &rent_stats);
   if (nets < 0) {
     err << "generation failed: spec rejected (see logged diagnostics)\n";
     return 1;
@@ -400,6 +476,8 @@ int runCliFromFile(const std::string& config_path,
                 *config.output_odb_path);
   }
   reportDesignSummary(block, logger);
+  reportPrimaryIoSummary(rent_stats, config.spec.sequential_ratio.value_or(0.0),
+                        logger);
   logger.info(utl::UKN, kMsgDone, "Done.");
   return 0;
 }

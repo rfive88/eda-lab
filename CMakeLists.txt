@@ -116,6 +116,15 @@ target_link_libraries(netlistgen_peak_cluster_test PRIVATE netlistgen odb utl
                                                            GTest::gtest
                                                            GTest::gtest_main)
 
+# Stage E1: primary I/O generation via Rent's rule, layered on the
+# statistical mix + Stage D + (optionally) peak fanout sub-clusters. Needs
+# hypergraph too (tests translate RentStats into hgm.is_pi/is_po/
+# is_boundary_buf/is_boundary_reg planes themselves — see the file comment).
+add_executable(netlistgen_rent_test test/netlistgen_rent_test.cpp)
+target_link_libraries(netlistgen_rent_test PRIVATE netlistgen hypergraph odb
+                                                   utl GTest::gtest
+                                                   GTest::gtest_main)
+
 add_executable(fm_partitioner_test test/fm_partitioner_test.cpp)
 target_compile_definitions(fm_partitioner_test
                            PRIVATE EDA_LAB_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
@@ -156,6 +165,7 @@ add_test(NAME netlistgen_link_smoke COMMAND netlistgen_link_smoke)
 add_test(NAME netlistgen_stagec_test COMMAND netlistgen_stagec_test)
 add_test(NAME netlistgen_staged_test COMMAND netlistgen_staged_test)
 add_test(NAME netlistgen_peak_cluster_test COMMAND netlistgen_peak_cluster_test)
+add_test(NAME netlistgen_rent_test COMMAND netlistgen_rent_test)
 add_test(NAME fm_partitioner_test COMMAND fm_partitioner_test)
 add_test(NAME cli_help_test COMMAND cli_help_test)
 add_test(NAME error_handling_test COMMAND error_handling_test)

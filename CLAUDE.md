@@ -342,7 +342,8 @@ made pin access IoType-based; Stage B added LEF-backed masters and the
 statistical cell mix; Stage C added DEF/`.odb` writers, net well-formedness
 validation, and the JSON-driven `netlistgen_cli`; Stage D made
 statistical-mix net formation combinational-loop-free by construction,
-completing Phase 1. Verilog writer + primary I/O ports are Stage E — see
+completing Phase 1; Stage E1 adds primary I/O port generation via Rent's
+rule (`T = k·Gᵖ`). Structural Verilog output is Stage E2 — see
 `src/engines/netlistgen/README.md`. Two core layers:
 
 - **`NetlistBuilder`** owns a fresh `dbDatabase` (tech, lib, chip, top block)
@@ -351,31 +352,44 @@ completing Phase 1. Verilog writer + primary I/O ports are Stage E — see
   required before `dbInst::create`). Synthetic masters are connectivity-only
   (no geometry) with pins named `i0..iN-1` / `o0..oM-1`; `loadLef()` loads a
   real tech + cell library instead.
-- **`generateSynthetic(builder, spec)`** populates the block from a
-  `SyntheticNetlistSpec`. Seeded `std::mt19937` makes a given (spec, seed)
-  reproducible; fanout = load pins per net, driver excluded, drawn from
-  `[min_fanout, max_fanout]`; every iterm lands on at most one net.
-  Statistical mode (sequential/combinational ratio + pin-count-bucket mix)
-  forms nets in instance-creation order with receiver-eligibility filtering
-  so combinational cycles are impossible by construction (a comb output only
-  drives sequential inputs or later-created comb instances); this requires
-  `sequential_ratio > 0` (fail-fast) until Stage E adds primary inputs. The
-  legacy weighted `masters` mix keeps unconstrained shuffled-pool pairing
-  (no acyclicity guarantee). Scale: ~500k insts / ~1.4M pins in about 2s.
-  Optional peak fanout sub-clusters (congestion hot-spots for validating
-  downstream metrics tooling) layer on top: `assignPeakClusters` groups a
-  subset of instances into clusters once per run, and cluster-driven nets
-  bias receiver selection toward same-cluster cells — strictly *within* the
-  pools Stage D already computed as eligible, so the DAG guarantee is
-  untouched. Requires the statistical mix (`peak_avg_fanout` set on a
-  legacy-mix spec fails validation).
+- **`generateSynthetic(builder, spec, out_cluster_id?, out_rent_stats?)`**
+  populates the block from a `SyntheticNetlistSpec`. Seeded `std::mt19937`
+  makes a given (spec, seed) reproducible; fanout = load pins per net,
+  driver excluded, drawn from `[min_fanout, max_fanout]`; every iterm lands
+  on at most one net. Statistical mode (sequential/combinational ratio +
+  pin-count-bucket mix) forms nets in instance-creation order with
+  receiver-eligibility filtering so combinational cycles are impossible by
+  construction (a comb output only drives sequential inputs or
+  later-created comb instances); this requires `sequential_ratio > 0`
+  (fail-fast; Stage E1's ports run as a later, separate pass and do not
+  relax this). The legacy weighted `masters` mix keeps unconstrained
+  shuffled-pool pairing (no acyclicity guarantee). Scale: ~500k insts /
+  ~1.4M pins in about 2s.
+  - **Peak fanout sub-clusters** (optional, congestion hot-spots for
+    validating downstream metrics tooling): `assignPeakClusters` groups a
+    subset of instances into clusters once per run, and cluster-driven nets
+    bias receiver selection toward same-cluster cells — strictly *within*
+    the pools Stage D already computed as eligible, so the DAG guarantee is
+    untouched. Requires the statistical mix.
+  - **Primary I/O generation via Rent's rule** (Stage E1, optional): sizes a
+    PI/PO terminal count from `T = k·Gᵖ`, randomly samples that many
+    already-formed nets, and inserts combinational/buffered/registered
+    boundary cells, reusing the statistical mix's representative masters. A
+    PI **replaces** its selected net's existing driver rather than adding a
+    second one (`netlist_validation.cpp` now folds `dbBTerm`s into its
+    driver/sink tally); a PO is just one more sink/observer. `netlistgen`
+    still never touches the `Hypergraph` engine — `RentStats` returns raw
+    `dbNet*`/`dbInst*` lists (`hgm.is_pi`/`is_po` are naturally hyperedge
+    planes, `is_boundary_buf`/`is_boundary_reg` vertex planes, but building
+    them is the caller's job). Requires the statistical mix.
 
 Tests: `test/netlistgen_test.cpp` (Stage A, no data files),
 `netlistgen_stageb_test.cpp` (statistical mix / LEF classification),
 `netlistgen_stagec_test.cpp` (writers, validation, CLI),
 `netlistgen_staged_test.cpp` (loop freedom, bootstrap fail-fast, thin-pool
 behavior, CLI DEF round-trip cycle check),
-`netlistgen_peak_cluster_test.cpp` (peak fanout sub-clusters).
+`netlistgen_peak_cluster_test.cpp` (peak fanout sub-clusters),
+`netlistgen_rent_test.cpp` (Stage E1 primary I/O generation).
 
 ## Partitioning engine (Stages 1–2)
 

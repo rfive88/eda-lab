@@ -7,7 +7,7 @@ GTest suites for eda-lab.
 ```bash
 cmake -B build              # Debug tree; build-release/ is the Release tree
 cmake --build build
-ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_stageb_test|netlistgen_stagec_test|netlistgen_staged_test|netlistgen_peak_cluster_test|netlistgen_link_smoke|fm_partitioner_test|cli_help_test|error_handling_test" --output-on-failure
+ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_stageb_test|netlistgen_stagec_test|netlistgen_staged_test|netlistgen_peak_cluster_test|netlistgen_rent_test|netlistgen_link_smoke|fm_partitioner_test|cli_help_test|error_handling_test" --output-on-failure
 ```
 
 The `-R` filter matters: a bare `ctest` also picks up the vendored OpenROAD
@@ -92,6 +92,21 @@ cd run
   target, out-of-range `peak_cluster_pct`, `num_peak_clusters=0`,
   legacy-mix rejection) and the "ignored when `peak_avg_fanout` absent"
   rule; and the `peak_cluster_pct`/`num_peak_clusters` defaults.
+- `netlistgen_rent_test.cpp` — Stage E1 primary I/O generation via Rent's
+  rule (`T = k·Gᵖ`), no data files needed but links `hypergraph` (the test
+  itself performs the RentStats -> hypergraph-plane translation `netlistgen`
+  deliberately doesn't — see its README's "Primary I/O generation
+  (Stage E1)"). Covers: no-E1-params leaves `RentStats.engaged` false and
+  every `hgm.*` plane absent; a basic 2000-inst run (target/actual Rent
+  within tolerance, PI/PO split, all four planes populated correctly,
+  `is_boundary_reg` never set on an internal FF, `p_actual` finite
+  positive); a custom `io_input_ratio`; an all-combinational
+  `io_pin_type_distribution` producing zero boundary cells; combining with
+  peak fanout sub-clusters (per-cluster + background Rent stats); all
+  validation failures (exactly-one-of `rent_k`/`rent_p`, `rent_p > 1.2`,
+  the `(1.0, 1.2]` warn-and-clamp case, bad `io_pin_type_distribution` sum,
+  out-of-range `io_input_ratio`, legacy-mix rejection); and a small-design
+  `T`-capping run that completes without crashing.
 - `netlistgen_link_smoke.cpp` — library-linkage guard for the same engine,
   no data files needed. A plain `main()` (no GTest) that links the
   `netlistgen` library as an external consumer would

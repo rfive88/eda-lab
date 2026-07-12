@@ -40,6 +40,34 @@ void tallyITerms(odb::dbNet* net, NetTally& tally)
   }
 }
 
+// Stage E1: a primary-input bTerm supplies a signal into the design (a
+// driver, from the internal net's perspective); a primary-output bTerm
+// observes/consumes one (a sink). Symmetric with tallyITerms' IoType
+// switch, just on the other terminal kind — folded in here (not a
+// duplicated rule) so a net with a bTerm is judged by the exact same
+// "exactly one driver, >=1 sink" rule as any other net.
+void tallyBTerms(odb::dbNet* net, NetTally& tally)
+{
+  for (odb::dbBTerm* bterm : net->getBTerms()) {
+    ++tally.connected;
+    const odb::dbSigType st = bterm->getSigType();
+    if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
+      continue;
+    }
+    switch (bterm->getIoType().getValue()) {
+      case odb::dbIoType::INPUT:
+        ++tally.drivers;
+        break;
+      case odb::dbIoType::OUTPUT:
+      case odb::dbIoType::INOUT:
+        ++tally.sinks;
+        break;
+      case odb::dbIoType::FEEDTHRU:
+        break;
+    }
+  }
+}
+
 }  // namespace
 
 NetlistValidation validateNetlist(odb::dbBlock* block)
@@ -52,8 +80,7 @@ NetlistValidation validateNetlist(odb::dbBlock* block)
   for (odb::dbNet* net : block->getNets()) {
     NetTally tally;
     tallyITerms(net, tally);
-    // Stage E: also tally primary-input dbBTerms as drivers and
-    // primary-output dbBTerms as sinks here before judging.
+    tallyBTerms(net, tally);
 
     const std::string name = net->getName();
     if (tally.connected == 0) {

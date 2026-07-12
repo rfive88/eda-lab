@@ -1,4 +1,4 @@
-// eda-lab: programmatic netlist construction (Phase 0, Stage D).
+// eda-lab: programmatic netlist construction (Phase 0, Stage E1).
 //
 // Builds a dbBlock through OpenDB API calls so tests and benchmarks can
 // construct netlists of any size with exactly known or statistically
@@ -33,10 +33,25 @@
 // form. Sequential (Q) outputs are unconstrained drivers (the loop-breaker);
 // sequential inputs (D/CK) are unconstrained sinks (feedback through a
 // register is legitimate, not combinational). This requires
-// sequential_ratio > 0 in statistical mode (fail-fast) until Stage E adds
-// primary-input ports as an alternate bootstrap source. The legacy weighted
-// mix (Stage A path) keeps its original shuffled-pool net formation and
-// makes no acyclicity guarantee. See README.md / FLOW.md.
+// sequential_ratio > 0 in statistical mode (fail-fast). Stage E1's primary
+// I/O ports (below) do NOT relax this: they run as a separate pass after
+// net formation completes and never participate in its DAG bootstrap. The
+// legacy weighted mix (Stage A path) keeps its original shuffled-pool net
+// formation and makes no acyclicity guarantee.
+//
+// Stage E1 (optional): primary input/output port generation sized by
+// Rent's rule (T = k * G^p), engaged when both rent_k and rent_p are set.
+// Runs as a separate pass over the already-formed dbBlock, once net
+// formation completes — never a change to formation itself. A PI REPLACES
+// its randomly-selected net's existing driver (never adds a second one:
+// real designs have a net driven either by a primary input or an instance
+// output, never both, and this repo enforces "exactly one driver per net"
+// as a hard invariant); a PO is just one more sink/observer. Requires the
+// statistical mix (reuses its representative masters for boundary
+// buffer/FF cells). netlistgen still never touches the Hypergraph engine —
+// see RentStats below and README.md's "Primary I/O generation (Stage E1)"
+// for the full rationale (including why is_pi/is_po end up as hyperedge,
+// not vertex, planes). See README.md / FLOW.md.
 
 #pragma once
 
@@ -158,6 +173,16 @@ struct MasterSpec
   double weight = 1.0;
 };
 
+// Fractional split of primary I/O pin types (Stage E1): each PI/PO gets one
+// type sampled independently from this distribution. See
+// SyntheticNetlistSpec::io_pin_type_distribution for validation/defaulting.
+struct IoPinTypeDistribution
+{
+  double combinational = 0.70;
+  double buffered = 0.20;
+  double registered = 0.10;
+};
+
 struct SyntheticNetlistSpec
 {
   // ---- Legacy weighted mix (Stage A) ----
@@ -240,6 +265,29 @@ struct SyntheticNetlistSpec
   // peak_avg_fanout is unset.
   std::optional<int> num_peak_clusters;
 
+  // ---- Stage E1: primary I/O generation via Rent's rule (optional) ----
+  // Engaged when BOTH rent_k and rent_p are set (exactly one alone is a
+  // validation error). Requires the statistical mix — boundary buffer/FF
+  // cells reuse its already-resolved combinational/sequential representative
+  // masters, mirroring the peak-cluster feature's same requirement.
+  //
+  // Rent coefficient k in T = k * G^p. Must be > 0.
+  std::optional<double> rent_k;
+  // Rent exponent p. Must be in (0, 1.2]: (0, 1.0] is used as given; (1.0,
+  // 1.2] is accepted but logged as a warning and CLAMPED to 1.0 for the T
+  // computation (degenerate but tolerable — p > 1 is physically unusual);
+  // > 1.2 is a validation error.
+  std::optional<double> rent_p;
+  // Fraction of the T terminals assigned as primary inputs; the remainder
+  // are primary outputs. Must be in (0, 1). Defaults to 0.60.
+  std::optional<double> io_input_ratio;
+  // Fractional split of pin types, applied independently to the PI and PO
+  // populations. Each fraction must be in [0, 1]; the three must sum to
+  // 1.0 +/- 0.01 (normalised silently if within tolerance but not exactly
+  // 1.0; a sum outside tolerance is a validation error). Defaults to
+  // {0.70, 0.20, 0.10} when unset.
+  std::optional<IoPinTypeDistribution> io_pin_type_distribution;
+
   // True when the statistical mix should drive generation.
   bool usesStatisticalMix() const
   {
@@ -247,6 +295,82 @@ struct SyntheticNetlistSpec
            || combinational_pin_distribution.has_value()
            || target_avg_fanout.has_value();
   }
+};
+
+// Per-cluster Rent statistics (Stage E1, Step 5): computed only when the
+// peak fanout sub-cluster feature is also engaged (cluster_id has at least
+// one non-background entry). A cluster with G_c < 2 or T_c < 1 is
+// degenerate and omitted here (logged as a warning), never included with
+// meaningless values.
+struct ClusterRentStats
+{
+  int cluster_idx = -1;
+  int G_c = 0;      // ORIGINAL internal instances (not boundary buf/FF) in
+                    // this cluster
+  int T_c = 0;      // cut nets: >=1 endpoint inside, >=1 endpoint outside
+                    // this cluster (an endpoint is an owning instance's
+                    // cluster, or -1/outside-every-cluster for a bTerm or a
+                    // boundary buf/FF instance)
+  double p_c = 0.0;
+  double k_c = 0.0;
+};
+
+// Statistics and generated artifacts from Stage E1 (primary I/O generation
+// via Rent's rule; T = k * G^p), returned from generateSynthetic via the
+// optional `out_rent_stats` parameter. `engaged` is false (every other
+// field default/empty) whenever rent_k/rent_p were not both set — the
+// pipeline then behaves exactly as it did before Stage E1 existed.
+//
+// netlistgen never reads or writes Hypergraph attribute planes (see the
+// "Input / output contract" in README.md) — the raw dbNet*/dbInst* lists
+// below let a caller that wants hgm.is_pi / hgm.is_po / hgm.is_boundary_buf
+// / hgm.is_boundary_reg hypergraph planes build them itself, from data
+// already collected here, after its own Hypergraph::buildFromBlock() call.
+// is_pi/is_po are naturally HYPEREDGE (net) planes — a bare port has no
+// dbInst and hence no vertex in this codebase's dbInst-only vertex model —
+// while is_boundary_buf/is_boundary_reg are VERTEX planes on the real
+// boundary instances Stage E1 creates. See README.md's "Primary I/O
+// generation (Stage E1)" section for the full rationale.
+struct RentStats
+{
+  bool engaged = false;
+
+  // ---- Target (Step 1) ----
+  double rent_k_target = 0.0;  // as given; rent_k itself is never clamped
+  double rent_p_target = 0.0;  // EFFECTIVE value used for T: clamped to 1.0
+                               // if the input was in (1.0, 1.2]
+  int G = 0;                   // internal instance count (spec.num_insts)
+  int T_target = 0;            // round(rent_k * G^rent_p_target)
+  bool capped = false;         // true if T_target exceeded the net count
+                               // and was capped down to it (Step 2)
+
+  // ---- Actual (Steps 2, 3, 6) ----
+  int T_in = 0;      // PI count actually created
+  int T_out = 0;     // PO count actually created
+  int T_actual = 0;  // T_in + T_out
+  double k_actual = 0.0;
+  double p_actual = 0.0;
+
+  int n_combinational = 0;  // PI+PO combined, by pin type
+  int n_buffered = 0;
+  int n_registered = 0;
+  int n_boundary_ff = 0;  // == n_registered; tracked separately from
+                         // spec.sequential_ratio, which this never touches
+
+  std::vector<odb::dbNet*> pi_nets;
+  std::vector<odb::dbNet*> po_nets;
+  std::vector<odb::dbInst*> boundary_buf_insts;
+  std::vector<odb::dbInst*> boundary_reg_insts;
+
+  // ---- Sub-cluster / background (Step 5), only when clusters are engaged ----
+  bool has_clusters = false;
+  std::vector<ClusterRentStats> cluster_rent;
+  bool background_valid = false;  // false if G_bg<2 or T_bg<1 (degenerate,
+                                  // logged; the fields below are then 0)
+  int G_bg = 0;
+  int T_bg = 0;
+  double p_bg = 0.0;
+  double k_bg = 0.0;
 };
 
 // Populate builder's block from the spec. Instances are named u0..u{n-1}
@@ -260,9 +384,13 @@ struct SyntheticNetlistSpec
 // (legacy mix, invalid spec, or no peak_avg_fanout). Exposed purely so
 // tests can verify cluster-biased fanout without adding cluster membership
 // to the persistent dbBlock/Hypergraph data model.
+// If `out_rent_stats` is non-null and the spec engages Stage E1 (both
+// rent_k and rent_p set), it is filled with the statistics/artifacts above.
+// Left untouched otherwise.
 int generateSynthetic(NetlistBuilder& builder,
                       const SyntheticNetlistSpec& spec,
-                      std::vector<int>* out_cluster_id = nullptr);
+                      std::vector<int>* out_cluster_id = nullptr,
+                      RentStats* out_rent_stats = nullptr);
 
 // ---- Shared statistical-mix helpers (exposed for testing) ----
 

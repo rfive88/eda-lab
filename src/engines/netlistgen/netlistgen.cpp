@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <initializer_list>
 #include <numeric>
@@ -46,6 +47,9 @@ constexpr int kMsgLefLoad = 310;
 constexpr int kMsgNoLefMasters = 311;
 constexpr int kMsgSeqBootstrap = 312;
 constexpr int kMsgPeakConfig = 313;
+constexpr int kMsgRentConfig = 314;
+constexpr int kMsgRentCap = 315;
+constexpr int kMsgRentDegenerate = 316;
 
 // Implementation constant: fraction of a cluster net's sink slots preferring
 // an intra-cluster receiver over background. Not exposed in the JSON config
@@ -280,6 +284,20 @@ bool validateSpecConfig(const SyntheticNetlistSpec& spec, utl::Logger* logger)
       }
       return false;
     }
+    // Stage E1 boundary buffer/FF cells reuse the statistical mix's already-
+    // resolved representative masters (comb bucket + seq class), unavailable
+    // on the legacy path.
+    if (spec.rent_k.has_value() || spec.rent_p.has_value()) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgRentConfig,
+                     "rent_k/rent_p require the statistical mix to be "
+                     "engaged (set sequential_ratio, target_avg_fanout, "
+                     "combinational_pin_distribution, or tech_lef_path); "
+                     "Stage E1 is not supported in the legacy weighted-mix "
+                     "path");
+      }
+      return false;
+    }
     // Legacy weighted mix: generateSynthetic checks masters non-emptiness.
     return true;
   }
@@ -408,6 +426,84 @@ bool validateSpecConfig(const SyntheticNetlistSpec& spec, utl::Logger* logger)
                      *spec.num_peak_clusters);
       }
       return false;
+    }
+  }
+
+  // Stage E1: primary I/O generation via Rent's rule (optional). Engaged
+  // only when BOTH rent_k and rent_p are set; exactly one alone is an error.
+  const bool has_rent_k = spec.rent_k.has_value();
+  const bool has_rent_p = spec.rent_p.has_value();
+  if (has_rent_k != has_rent_p) {
+    if (logger) {
+      logger->warn(utl::UKN, kMsgRentConfig,
+                   "rent_k and rent_p must both be set to engage Stage E1 "
+                   "(got rent_k={}, rent_p={})",
+                   has_rent_k ? "set" : "unset", has_rent_p ? "set" : "unset");
+    }
+    return false;
+  }
+  if (has_rent_k && has_rent_p) {
+    if (*spec.rent_k <= 0.0) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgRentConfig, "rent_k must be > 0, got {}",
+                     *spec.rent_k);
+      }
+      return false;
+    }
+    // (0, 1.0]: fine as given. (1.0, 1.2]: warn only — accepted, clamped to
+    // 1.0 wherever rent_p feeds a computation (T_target). > 1.2: hard error.
+    if (*spec.rent_p <= 0.0) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgRentConfig, "rent_p must be > 0, got {}",
+                     *spec.rent_p);
+      }
+      return false;
+    }
+    if (*spec.rent_p > 1.2) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgRentConfig,
+                     "rent_p must be in (0, 1.2], got {}", *spec.rent_p);
+      }
+      return false;
+    }
+    if (*spec.rent_p > 1.0 && logger) {
+      logger->warn(utl::UKN, kMsgRentConfig,
+                   "rent_p {} is in the degenerate-but-tolerable range "
+                   "(1.0, 1.2]; clamping to 1.0 for the T_target computation",
+                   *spec.rent_p);
+    }
+    if (spec.io_input_ratio.has_value()
+        && (*spec.io_input_ratio <= 0.0 || *spec.io_input_ratio >= 1.0)) {
+      if (logger) {
+        logger->warn(utl::UKN, kMsgRentConfig,
+                     "io_input_ratio must be in (0, 1), got {}",
+                     *spec.io_input_ratio);
+      }
+      return false;
+    }
+    if (spec.io_pin_type_distribution.has_value()) {
+      const IoPinTypeDistribution& d = *spec.io_pin_type_distribution;
+      for (double v : {d.combinational, d.buffered, d.registered}) {
+        if (v < 0.0 || v > 1.0) {
+          if (logger) {
+            logger->warn(utl::UKN, kMsgRentConfig,
+                         "io_pin_type_distribution fractions must each be "
+                         "in [0, 1], got {}",
+                         v);
+          }
+          return false;
+        }
+      }
+      const double sum = d.combinational + d.buffered + d.registered;
+      if (std::abs(sum - 1.0) > 0.01) {
+        if (logger) {
+          logger->warn(utl::UKN, kMsgRentConfig,
+                       "io_pin_type_distribution fractions must sum to 1.0 "
+                       "+/- 0.01, got {}",
+                       sum);
+        }
+        return false;
+      }
     }
   }
   return true;
@@ -1152,6 +1248,391 @@ int formNetsAcyclic(NetlistBuilder& builder,
   return nets_made;
 }
 
+// The three I/O pin types Stage E1 samples independently for each PI/PO net.
+enum class IoPinKind
+{
+  kCombinational,
+  kBuffered,
+  kRegistered
+};
+
+// First non-power/ground OUTPUT iterm on `inst`, or nullptr. Used to find a
+// freshly-created boundary buffer/FF instance's driver pin (never fails in
+// practice — every comb/seq representative master Stage E1 reuses has at
+// least one signal output, per Stage B's own invariants).
+odb::dbITerm* firstOutputIterm(odb::dbInst* inst)
+{
+  for (odb::dbITerm* it : inst->getITerms()) {
+    const odb::dbSigType st = it->getSigType();
+    if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
+      continue;
+    }
+    if (it->getIoType() == odb::dbIoType::OUTPUT) {
+      return it;
+    }
+  }
+  return nullptr;
+}
+
+// First non-power/ground, non-clock INPUT/INOUT iterm on `inst` — the "data"
+// input a PI feeds (never the CK pin of a boundary FF). Clock recognition
+// mirrors isSequentialMaster: dbSigType::CLOCK or the conventional-name
+// fallback, both checked at the owning dbMTerm.
+odb::dbITerm* firstDataInputIterm(odb::dbInst* inst)
+{
+  for (odb::dbITerm* it : inst->getITerms()) {
+    const odb::dbSigType st = it->getSigType();
+    if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
+      continue;
+    }
+    const auto io = it->getIoType().getValue();
+    if (io != odb::dbIoType::INPUT && io != odb::dbIoType::INOUT) {
+      continue;
+    }
+    odb::dbMTerm* mt = it->getMTerm();
+    if (mt->getSigType() == odb::dbSigType::CLOCK) {
+      continue;
+    }
+    if (mt->getIoType() == odb::dbIoType::INPUT
+        && isClockPinName(mt->getName())) {
+      continue;
+    }
+    return it;
+  }
+  return nullptr;
+}
+
+// Stage E1: primary input/output port generation governed by Rent's rule
+// (T = k * G^p). Runs once, after formNetsAcyclic completes, directly on the
+// already-formed dbBlock — a separate pass, not a change to net formation
+// itself. No-op (returns a default-constructed, `engaged = false` result)
+// unless both spec.rent_k and spec.rent_p are set (validateSpecConfig has
+// already enforced they're both-or-neither).
+//
+// PI/PO realization (see README.md's "Primary I/O generation (Stage E1)"
+// section for the full rationale): every net Stage D forms already has
+// exactly one committed internal driver, so a PI cannot be "added" as a
+// second driver without producing a two-driver net — this codebase treats
+// "exactly one driver per net" as a hard invariant (validateNetlist), and
+// preserving that real-world net<->driver correspondence was an explicit
+// design decision for this feature. A PI-selected net's existing driver
+// ITerm is therefore DISCONNECTED (freed, left unused) and the PI's
+// dbBTerm(INPUT) becomes the net's sole driver. A PO has no such conflict —
+// its dbBTerm(OUTPUT) is simply one more sink/observer alongside the net's
+// unchanged existing driver and sinks.
+//
+// Boundary buffer/FF cells reuse the statistical mix's already-resolved
+// representative masters (the first non-empty combinational bucket for a
+// buffer; the (guaranteed non-empty, by Stage D's bootstrap rule)
+// sequential class for a boundary FF) rather than inventing new ones —
+// works identically in synthetic and LEF mode with no extra master-sourcing
+// logic. Reused instance/net naming continues the existing u<i>/n<i>
+// sequences (planes, not names, are what distinguish a boundary cell from
+// an internal one — same philosophy already used for is_boundary_reg
+// vs internal sequential instances).
+RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
+                                const SyntheticNetlistSpec& spec,
+                                std::mt19937& rng, const GenPlan& plan,
+                                int next_inst_id, int next_net_id,
+                                const std::vector<int>& cluster_id)
+{
+  RentStats stats;
+  if (!spec.rent_k.has_value() || !spec.rent_p.has_value()) {
+    return stats;
+  }
+  utl::Logger* logger = builder.logger();
+  stats.engaged = true;
+
+  // ---- Step 1: target terminal count ----
+  const int G = spec.num_insts;
+  stats.G = G;
+  stats.rent_k_target = *spec.rent_k;
+  stats.rent_p_target = std::min(*spec.rent_p, 1.0);  // clamp (1.0, 1.2]
+  const int T_target = static_cast<int>(
+      std::lround(stats.rent_k_target * std::pow(G, stats.rent_p_target)));
+  stats.T_target = T_target;
+  const double io_input_ratio = spec.io_input_ratio.value_or(0.60);
+
+  // ---- Step 2: identify boundary candidates via random sampling ----
+  std::vector<odb::dbNet*> net_list;
+  for (odb::dbNet* net : builder.block()->getNets()) {
+    net_list.push_back(net);
+  }
+  std::shuffle(net_list.begin(), net_list.end(), rng);
+
+  int T_in = static_cast<int>(std::lround(T_target * io_input_ratio));
+  int T_out = T_target - T_in;
+  if (T_in + T_out > static_cast<int>(net_list.size())) {
+    if (logger != nullptr) {
+      logger->warn(utl::UKN, kMsgRentCap,
+                   "E1: T ({}) exceeds net count ({}); capping at net count",
+                   T_in + T_out, static_cast<int>(net_list.size()));
+    }
+    stats.capped = true;
+    const int T_capped = static_cast<int>(net_list.size());
+    T_in = static_cast<int>(std::lround(T_capped * io_input_ratio));
+    T_out = T_capped - T_in;
+  }
+  const std::vector<odb::dbNet*> pi_nets(net_list.begin(),
+                                         net_list.begin() + T_in);
+  const std::vector<odb::dbNet*> po_nets(net_list.begin() + T_in,
+                                         net_list.begin() + T_in + T_out);
+  stats.T_in = T_in;
+  stats.T_out = T_out;
+  stats.T_actual = T_in + T_out;
+
+  // ---- Step 3: assign pin types and insert boundary cells ----
+  IoPinTypeDistribution dist =
+      spec.io_pin_type_distribution.value_or(IoPinTypeDistribution{});
+  const double dist_sum = dist.combinational + dist.buffered + dist.registered;
+  if (dist_sum > 0.0) {  // normalise silently, per the config's own rule
+    dist.combinational /= dist_sum;
+    dist.buffered /= dist_sum;
+    dist.registered /= dist_sum;
+  }
+  std::discrete_distribution<int> pick_pin_type(
+      {dist.combinational, dist.buffered, dist.registered});
+
+  // Reused representative masters for boundary cells: the first populated
+  // combinational bucket (buffer) and the sequential class (boundary FF),
+  // guaranteed non-empty by validateSpecConfig's mode-exclusivity check and
+  // Stage D's sequential_ratio > 0 bootstrap rule respectively.
+  odb::dbMaster* buffer_master = nullptr;
+  for (const auto& bucket : plan.comb) {
+    if (!bucket.empty()) {
+      buffer_master = bucket.front();
+      break;
+    }
+  }
+  odb::dbMaster* ff_master = plan.seq.empty() ? nullptr : plan.seq.front();
+
+  auto makeFeedNet = [&](odb::dbITerm* sink_iterm) {
+    // PI-only helper: the tiny feed net for a buffered/registered PI, whose
+    // only elements are the new instance's data-input sink and the PI
+    // bTerm itself.
+    odb::dbNet* feed = builder.makeNet("n" + std::to_string(next_net_id++));
+    sink_iterm->connect(feed);
+    const std::string bname = "pi" + std::to_string(stats.pi_nets.size());
+    odb::dbBTerm* bterm = odb::dbBTerm::create(feed, bname.c_str());
+    bterm->setIoType(odb::dbIoType::INPUT);
+    return feed;
+  };
+
+  for (odb::dbNet* net : pi_nets) {
+    odb::dbITerm* old_driver = nullptr;
+    for (odb::dbITerm* it : net->getITerms()) {
+      if (it->getIoType() == odb::dbIoType::OUTPUT) {
+        old_driver = it;
+        break;
+      }
+    }
+    if (old_driver != nullptr) {
+      old_driver->disconnect();
+    }
+    const IoPinKind kind = static_cast<IoPinKind>(pick_pin_type(rng));
+    switch (kind) {
+      case IoPinKind::kCombinational: {
+        const std::string bname = "pi" + std::to_string(stats.pi_nets.size());
+        odb::dbBTerm* bterm = odb::dbBTerm::create(net, bname.c_str());
+        bterm->setIoType(odb::dbIoType::INPUT);
+        ++stats.n_combinational;
+        break;
+      }
+      case IoPinKind::kBuffered: {
+        odb::dbInst* buf = builder.makeInst(
+            buffer_master, "u" + std::to_string(next_inst_id++));
+        odb::dbITerm* out = firstOutputIterm(buf);
+        odb::dbITerm* in = firstDataInputIterm(buf);
+        out->connect(net);
+        makeFeedNet(in);
+        stats.boundary_buf_insts.push_back(buf);
+        ++stats.n_buffered;
+        break;
+      }
+      case IoPinKind::kRegistered: {
+        odb::dbInst* ff = builder.makeInst(
+            ff_master, "u" + std::to_string(next_inst_id++));
+        odb::dbITerm* q = firstOutputIterm(ff);
+        odb::dbITerm* d = firstDataInputIterm(ff);
+        q->connect(net);
+        makeFeedNet(d);
+        stats.boundary_reg_insts.push_back(ff);
+        ++stats.n_registered;
+        ++stats.n_boundary_ff;
+        break;
+      }
+    }
+    stats.pi_nets.push_back(net);
+  }
+
+  for (odb::dbNet* net : po_nets) {
+    const IoPinKind kind = static_cast<IoPinKind>(pick_pin_type(rng));
+    switch (kind) {
+      case IoPinKind::kCombinational: {
+        const std::string bname = "po" + std::to_string(stats.po_nets.size());
+        odb::dbBTerm* bterm = odb::dbBTerm::create(net, bname.c_str());
+        bterm->setIoType(odb::dbIoType::OUTPUT);
+        ++stats.n_combinational;
+        break;
+      }
+      case IoPinKind::kBuffered: {
+        odb::dbInst* buf = builder.makeInst(
+            buffer_master, "u" + std::to_string(next_inst_id++));
+        odb::dbITerm* in = firstDataInputIterm(buf);
+        odb::dbITerm* out = firstOutputIterm(buf);
+        in->connect(net);  // additional sink of the existing net
+        odb::dbNet* feed = builder.makeNet("n" + std::to_string(next_net_id++));
+        out->connect(feed);
+        const std::string bname = "po" + std::to_string(stats.po_nets.size());
+        odb::dbBTerm* bterm = odb::dbBTerm::create(feed, bname.c_str());
+        bterm->setIoType(odb::dbIoType::OUTPUT);
+        stats.boundary_buf_insts.push_back(buf);
+        ++stats.n_buffered;
+        break;
+      }
+      case IoPinKind::kRegistered: {
+        odb::dbInst* ff = builder.makeInst(
+            ff_master, "u" + std::to_string(next_inst_id++));
+        odb::dbITerm* d = firstDataInputIterm(ff);
+        odb::dbITerm* q = firstOutputIterm(ff);
+        d->connect(net);  // additional sink of the existing net
+        odb::dbNet* feed = builder.makeNet("n" + std::to_string(next_net_id++));
+        q->connect(feed);
+        const std::string bname = "po" + std::to_string(stats.po_nets.size());
+        odb::dbBTerm* bterm = odb::dbBTerm::create(feed, bname.c_str());
+        bterm->setIoType(odb::dbIoType::OUTPUT);
+        stats.boundary_reg_insts.push_back(ff);
+        ++stats.n_registered;
+        ++stats.n_boundary_ff;
+        break;
+      }
+    }
+    stats.po_nets.push_back(net);
+  }
+
+  // ---- Step 6: actual Rent computation for the full design ----
+  if (G > 1 && stats.T_actual > 0) {
+    stats.p_actual = std::log(stats.T_actual) / std::log(G);
+    stats.k_actual = stats.T_actual / std::pow(G, stats.p_actual);
+  }
+
+  // ---- Step 5: sub-cluster (+ background) Rent computation ----
+  // cluster_id is index-aligned with the ORIGINAL internal instances
+  // (u0..u{G-1}); boundary buf/FF cells created just above (u{G}..) have no
+  // entry and are treated as background (-1) for cut-net purposes, same as
+  // any dbBTerm — both are, definitionally, outside every user cluster.
+  const bool has_any_cluster =
+      std::any_of(cluster_id.begin(), cluster_id.end(),
+                  [](int c) { return c >= 0; });
+  if (has_any_cluster) {
+    stats.has_clusters = true;
+    auto clusterOfInst = [&](odb::dbInst* inst) -> int {
+      const int idx = std::atoi(inst->getName().c_str() + 1);
+      return idx < static_cast<int>(cluster_id.size()) ? cluster_id[idx] : -1;
+    };
+    // For each net, the set of distinct clusters its endpoints touch
+    // (instance-owned ITerms via clusterOfInst; a connected dbBTerm always
+    // counts as "outside every cluster").
+    auto touchedClusters = [&](odb::dbNet* net, bool* touches_boundary) {
+      std::vector<int> clusters;
+      *touches_boundary = !net->getBTerms().empty();
+      for (odb::dbITerm* it : net->getITerms()) {
+        clusters.push_back(clusterOfInst(it->getInst()));
+      }
+      return clusters;
+    };
+
+    const int num_clusters = spec.num_peak_clusters.value_or(1);
+    for (int c = 0; c < num_clusters; ++c) {
+      int G_c = 0;
+      for (int i = 0; i < G; ++i) {
+        if (cluster_id[i] == c) {
+          ++G_c;
+        }
+      }
+      int T_c = 0;
+      for (odb::dbNet* net : builder.block()->getNets()) {
+        bool touches_boundary = false;
+        const std::vector<int> clusters = touchedClusters(net, &touches_boundary);
+        const bool in_c = std::any_of(clusters.begin(), clusters.end(),
+                                      [c](int x) { return x == c; });
+        const bool out_c =
+            touches_boundary
+            || std::any_of(clusters.begin(), clusters.end(),
+                           [c](int x) { return x != c; });
+        if (in_c && out_c) {
+          ++T_c;
+        }
+      }
+      if (G_c < 2 || T_c < 1) {
+        if (logger != nullptr) {
+          logger->warn(utl::UKN, kMsgRentDegenerate,
+                       "E1: cluster {} is degenerate (G_c={}, T_c={}); "
+                       "skipping its Rent stats",
+                       c, G_c, T_c);
+        }
+        continue;
+      }
+      ClusterRentStats cr;
+      cr.cluster_idx = c;
+      cr.G_c = G_c;
+      cr.T_c = T_c;
+      cr.p_c = std::log(T_c) / std::log(G_c);
+      cr.k_c = T_c / std::pow(G_c, cr.p_c);
+      stats.cluster_rent.push_back(cr);
+    }
+
+    // Background: G_bg = original internal instances with cluster_id == -1.
+    // T_bg = nets with a background endpoint AND (a non-background-cluster
+    // endpoint OR a PI/PO bTerm) — a strict superset of the cross-cluster
+    // rule above, since a net entirely inside the background that also
+    // reaches a boundary port is itself a boundary-crossing (I/O) net.
+    int G_bg = 0;
+    for (int i = 0; i < G; ++i) {
+      if (cluster_id[i] < 0) {
+        ++G_bg;
+      }
+    }
+    int T_bg = 0;
+    for (odb::dbNet* net : builder.block()->getNets()) {
+      bool touches_boundary = false;
+      const std::vector<int> clusters = touchedClusters(net, &touches_boundary);
+      const bool has_bg = std::any_of(clusters.begin(), clusters.end(),
+                                      [](int x) { return x < 0; });
+      const bool has_non_bg_cluster =
+          std::any_of(clusters.begin(), clusters.end(),
+                     [](int x) { return x >= 0; });
+      if (has_bg && (has_non_bg_cluster || touches_boundary)) {
+        ++T_bg;
+      }
+    }
+    stats.G_bg = G_bg;
+    stats.T_bg = T_bg;
+    if (G_bg < 2 || T_bg < 1) {
+      if (logger != nullptr) {
+        logger->warn(utl::UKN, kMsgRentDegenerate,
+                     "E1: background is degenerate (G_bg={}, T_bg={}); "
+                     "skipping its Rent stats",
+                     G_bg, T_bg);
+      }
+    } else {
+      stats.background_valid = true;
+      stats.p_bg = std::log(T_bg) / std::log(G_bg);
+      stats.k_bg = T_bg / std::pow(G_bg, stats.p_bg);
+    }
+  }
+
+  if (logger != nullptr) {
+    debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,
+               "E1: T_target {} -> T_actual {} (PI {}, PO {}); pin types "
+               "comb {} / buf {} / reg {}; k_actual {:.3f} p_actual {:.3f}",
+               T_target, stats.T_actual, stats.T_in, stats.T_out,
+               stats.n_combinational, stats.n_buffered, stats.n_registered,
+               stats.k_actual, stats.p_actual);
+  }
+  return stats;
+}
+
 // Legacy weighted-mix generation (Stage A path). Deterministic for a given
 // (spec, seed); net shapes reflect the loads-based fanout definition.
 int generateLegacy(NetlistBuilder& builder, const SyntheticNetlistSpec& spec,
@@ -1178,7 +1659,8 @@ int generateLegacy(NetlistBuilder& builder, const SyntheticNetlistSpec& spec,
 // roll, then a bucket roll, then a uniform pick among the bucket's masters.
 int generateStatistical(NetlistBuilder& builder,
                         const SyntheticNetlistSpec& spec, std::mt19937& rng,
-                        std::vector<int>* out_cluster_id)
+                        std::vector<int>* out_cluster_id,
+                        RentStats* out_rent_stats)
 {
   utl::Logger* logger = builder.logger();
   GenPlan plan;
@@ -1223,9 +1705,14 @@ int generateStatistical(NetlistBuilder& builder,
   }
 
   // Stage D: ordered, acyclic-by-construction net formation (the legacy path
-  // keeps the original shuffled-pool formNets).
-  const int nets_made =
-      formNetsAcyclic(builder, insts, spec, rng, out_cluster_id);
+  // keeps the original shuffled-pool formNets). cluster_id is threaded
+  // through unconditionally — Stage E1's sub-cluster Rent computation below
+  // needs it regardless of whether the caller asked for out_cluster_id.
+  std::vector<int> cluster_id;
+  const int nets_made = formNetsAcyclic(builder, insts, spec, rng, &cluster_id);
+  if (out_cluster_id != nullptr) {
+    *out_cluster_id = cluster_id;
+  }
 
   // Post-generation empirical check: logged warning only, never a failure.
   const double tol = spec.distribution_tolerance_pct;
@@ -1280,6 +1767,15 @@ int generateStatistical(NetlistBuilder& builder,
                    obs_fanout, *spec.target_avg_fanout);
     }
   }
+
+  // Stage E1: primary I/O generation via Rent's rule, a separate pass over
+  // the already-formed dbBlock (no-op unless rent_k/rent_p are both set).
+  // Continues the u<i>/n<i> naming sequences from the internal counts above.
+  const RentStats rent_stats = applyPrimaryIoStageE1(
+      builder, spec, rng, plan, spec.num_insts, nets_made, cluster_id);
+  if (out_rent_stats != nullptr) {
+    *out_rent_stats = rent_stats;
+  }
   return nets_made;
 }
 
@@ -1287,7 +1783,8 @@ int generateStatistical(NetlistBuilder& builder,
 
 int generateSynthetic(NetlistBuilder& builder,
                       const SyntheticNetlistSpec& spec,
-                      std::vector<int>* out_cluster_id)
+                      std::vector<int>* out_cluster_id,
+                      RentStats* out_rent_stats)
 {
   utl::Logger* logger = builder.logger();
   const bool stat = spec.usesStatisticalMix();
@@ -1327,7 +1824,8 @@ int generateSynthetic(NetlistBuilder& builder,
     }
     nets = generateLegacy(builder, spec, rng);
   } else {
-    nets = generateStatistical(builder, spec, rng, out_cluster_id);
+    nets = generateStatistical(builder, spec, rng, out_cluster_id,
+                               out_rent_stats);
   }
   if (logger != nullptr && nets >= 0) {
     debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,

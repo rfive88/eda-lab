@@ -39,6 +39,18 @@
 // legacy weighted mix (Stage A path) keeps its original shuffled-pool net
 // formation and makes no acyclicity guarantee.
 //
+// Stage D also GUARANTEES every instance ends up with >= 1 connected output
+// (as hard an invariant as loop-freedom itself). The ordered statistical
+// draw above can, by its own thin-tail design, leave a driver with zero
+// eligible receivers (skipped, no net formed) — formNetsAcyclic's second,
+// separate repair pass then gives every such instance exactly one receiver,
+// respecting the same DAG rule, preferring leftover unconnected material and
+// falling back to stealing a non-last sink of a multi-sink net only if none
+// exists, never touching a live driver. See README.md's "Guaranteed instance
+// connectivity" section for the full design (including why an earlier,
+// up-front reservation scheme was discarded) and netlist_validation.h for
+// the hard gate (validateNetlist) this repair exists to satisfy.
+//
 // Stage E1 (optional): primary input/output port generation sized by
 // Rent's rule (T = k * G^p), engaged when both rent_k and rent_p are set.
 // Runs as a separate pass over the already-formed dbBlock, once net

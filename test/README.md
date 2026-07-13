@@ -61,15 +61,18 @@ cd run
   LEF) and the built `netlistgen_cli` binary (path compiled in via
   `NETLISTGEN_CLI_BIN`; `add_dependencies` ensures it is built first). Covers:
   `validateNetlist` passing on synthetic + LEF-backed output and flagging
-  hand-built dangling / driverless / multi-driver / sinkless nets; the writers
-  producing files; JSON parsing (Mode A/B valid, missing `instance_count`, no
-  output path, malformed JSON); the CLI's validate-before-write fail-fast on a
-  malformed block (nothing written); and a CLI smoke test that spawns the
-  binary, reads the DEF back through `defin`, and confirms instance/net counts.
+  hand-built dangling / driverless / multi-driver / sinkless nets and a
+  hand-built dangling *instance* (output never assigned any net at all,
+  independent of the net-centric checks); the writers producing files; JSON
+  parsing (Mode A/B valid, missing `instance_count`, no output path,
+  malformed JSON); the CLI's validate-before-write fail-fast on a malformed
+  block (nothing written); and a CLI smoke test that spawns the binary,
+  reads the DEF back through `defin`, and confirms instance/net counts.
   (Well-formedness is a distinct guarantee from loop-freedom — the latter is
   Stage D's, covered by `netlistgen_staged_test.cpp`.)
 - `netlistgen_staged_test.cpp` — Stage D of the same engine: combinational-
-  loop freedom of the statistical net formation. Needs `EDA_LAB_DATA_DIR`
+  loop freedom of the statistical net formation and the guaranteed-instance-
+  connectivity repair pass layered on top of it. Needs `EDA_LAB_DATA_DIR`
   and `NETLISTGEN_CLI_BIN`. Covers: cycle-detector sanity on a hand-built
   two-inverter loop (must flag) and a register feedback loop (must not);
   DFS cycle detection — sequential instances cut at the D/Q boundary — over
@@ -79,7 +82,9 @@ cd run
   the acyclic block; the `sequential_ratio > 0` bootstrap fail-fast (zero,
   unset, just-above-zero passes, legacy-mode exemption); the thin-pool edge
   case (loosened receiver counts / skipped tail drivers, never a sinkless
-  net, deterministic on rerun); and a spawned-CLI DEF round-trip confirmed
+  net, deterministic on rerun); the strict no-dangling-instance invariant
+  (every instance has >= 1 connected output) checked on every generating
+  synthetic/LEF-backed run above; and a spawned-CLI DEF round-trip confirmed
   loop-free.
 - `netlistgen_peak_cluster_test.cpp` — peak fanout sub-clusters (congestion
   hot-spot generation layered on the statistical mix + Stage D), no data

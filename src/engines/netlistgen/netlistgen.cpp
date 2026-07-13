@@ -10,6 +10,7 @@
 #include <initializer_list>
 #include <numeric>
 #include <random>
+#include <set>
 #include <string>
 #include <unordered_map>
 
@@ -51,6 +52,7 @@ constexpr int kMsgRentConfig = 314;
 constexpr int kMsgRentCap = 315;
 constexpr int kMsgRentDegenerate = 316;
 constexpr int kMsgRentSkipped = 317;
+constexpr int kMsgNoDanglingInfeasible = 318;
 
 // Implementation constant: fraction of a cluster net's sink slots preferring
 // an intra-cluster receiver over background. Not exposed in the JSON config
@@ -1052,6 +1054,11 @@ int formNetsAcyclic(NetlistBuilder& builder,
     return it == iterm_cluster.end() ? -1 : it->second;
   };
 
+  // owner_index: which instance each input/inout iterm belongs to, needed
+  // only by the no-dangling-instance repair pass below (it must tell
+  // whether a candidate receiver's owner satisfies the DAG order rule
+  // relative to a specific combinational driver).
+  std::unordered_map<odb::dbITerm*, int> owner_index;
   for (int i = 0; i < n; ++i) {
     inst_is_seq[i] = isSequentialMaster(insts[i]->getMaster()) ? 1 : 0;
     for (odb::dbITerm* iterm : insts[i]->getITerms()) {
@@ -1066,6 +1073,7 @@ int formNetsAcyclic(NetlistBuilder& builder,
       if (peak_enabled && cluster_id[i] >= 0) {
         iterm_cluster[iterm] = cluster_id[i];
       }
+      owner_index[iterm] = i;
       if (inst_is_seq[i]) {
         seq_pool.push_back(iterm);
       } else {
@@ -1107,6 +1115,12 @@ int formNetsAcyclic(NetlistBuilder& builder,
                                                        peak_max_fanout);
   std::uniform_real_distribution<double> unit(0.0, 1.0);
 
+  // Tracks whether each instance ended up with at least one connected
+  // output pin during the main statistical pass below — the no-dangling-
+  // instance repair pass (after the loop) only needs to act on instances
+  // where this is still false.
+  std::vector<char> has_connection(n, 0);
+
   int nets_made = 0;
   int loosened = 0;
   int skipped = 0;
@@ -1127,6 +1141,15 @@ int formNetsAcyclic(NetlistBuilder& builder,
     const bool seq_driver = inst_is_seq[i] != 0;
     const int driver_cluster = peak_enabled ? cluster_id[i] : -1;
     const bool cluster_net = driver_cluster >= 0;
+    // This is the ORIGINAL, unrestricted statistical draw (no reservation,
+    // no per-driver guarantee) — kept exactly as before so fanout
+    // distributions (including peak-cluster targeting) are unaffected by
+    // the no-dangling-instance guarantee, which is instead enforced by a
+    // separate, surgical repair pass after this loop (see its header
+    // comment for why: reserving a receiver for every one of the n
+    // instances up front — an earlier revision of this fix — measurably
+    // thinned the shared pools and dragged down achieved fanout for every
+    // driver, not just the rare one actually at risk of dangling).
     for (odb::dbITerm* out : insts[i]->getITerms()) {
       if (spec.num_nets >= 0 && nets_made >= spec.num_nets) {
         break;
@@ -1154,11 +1177,11 @@ int formNetsAcyclic(NetlistBuilder& builder,
 
       odb::dbNet* net = builder.makeNet("n" + std::to_string(nets_made));
       out->connect(net);
+      has_connection[i] = 1;
       // Peek/take helpers over the flat union of eligible pools (order:
-      // seq_pool, comb_active, comb_retired-if-seq-driver), matching the
-      // background draw exactly; used both for the plain draw and for
-      // rejection-sampling a cluster-preferred draw without mutating state
-      // on a rejected attempt.
+      // seq_pool, comb_active, comb_retired-if-seq-driver); used both for
+      // the plain draw and for rejection-sampling a cluster-preferred draw
+      // without mutating state on a rejected attempt.
       auto peekEligible = [&](size_t r) -> odb::dbITerm* {
         if (r < seq_pool.size()) {
           return seq_pool[r];
@@ -1235,12 +1258,244 @@ int formNetsAcyclic(NetlistBuilder& builder,
       }
     }
   }
+
+  // ---- No-dangling-instance repair pass ----
+  // See README.md's "Guaranteed instance connectivity" section for the
+  // full derivation, including an earlier, discarded revision of this fix
+  // (an up-front per-instance receiver reservation) and the numbers that
+  // exposed its cost. The statistical pass above is entirely unrestricted
+  // and, exactly like Stage D's original design, may leave a driver near
+  // the thin tail of the order with no eligible receiver at all — "skipped"
+  // above. Because comb_active/seq_pool only ever shrink over the run
+  // (never regrow), once a combinational driver sees eligible == 0, every
+  // later combinational driver structurally sees it too: dangling drivers
+  // form a suffix of the creation order, never scattered arbitrarily.
+  //
+  // This pass finds every instance that ended up with NO connected output
+  // at all (has_connection[i] false — checked across ALL its output pins,
+  // not just one) and gives it exactly one receiver, respecting the same
+  // DAG rule the main pass enforces (a combinational driver may only feed a
+  // combinational input at a STRICTLY LATER index, or any sequential
+  // input; a sequential driver may feed anything but itself).
+  //
+  // Two ordering choices matter here, both because seq_pool is a shared
+  // resource EVERY dangling driver (combinational or sequential, any
+  // index) can legally draw from, while a combinational driver's
+  // owner-index>i candidates are a resource only IT and later drivers can
+  // use — so seq_pool is the more precious, universally-fungible resource
+  // and must be protected for whichever dangling driver needs it most:
+  //   - Receiver search PREFERS comb_active/comb_retired (filtered to
+  //     owner>i) before touching seq_pool, so a driver with its OWN
+  //     order-scarce option available doesn't needlessly spend the shared
+  //     pool that a later, more-constrained driver may depend on entirely.
+  //   - The OUTER scan runs in REVERSE creation order (n-1 down to 0): the
+  //     LAST instance in the design is the most constrained (it has zero
+  //     later-index candidates at all, so seq_pool is its ONLY option),
+  //     so it must get first pick of seq_pool while it is fullest, before
+  //     earlier — and therefore less constrained — dangling drivers are
+  //     even considered.
+  // This never touches a live driver — falling back to "stealing" a
+  // non-last sink of an already multi-sink net only if no leftover
+  // material exists anywhere, mirroring Stage E1's own PI/PO wiring
+  // philosophy (see its header comment) applied internally rather than at
+  // the port boundary. A repair never exceeds spec.num_nets: a driver left
+  // dangling purely because the caller's net-count cap truncated
+  // generation before it was ever reached is a deliberate truncation, not
+  // a bug, and is intentionally left for the well-formedness check to
+  // report.
+  // comb_active/comb_retired, indexed by owner instance for O(log n)
+  // "does anything with owner > i still exist" queries — a linear scan
+  // over these pools per repaired instance would be O(n) each, and with
+  // up to n repairs that is O(n^2), far too slow at the scale this engine
+  // targets (hundreds of thousands of instances). Both pools are pure
+  // combinational-input material at this point (see the pool-construction
+  // loop above) and, for repair purposes, are interchangeable — merged
+  // into one owner-sorted set. comb_active/comb_retired themselves are not
+  // touched again after this; nothing below reads them.
+  std::set<std::pair<int, odb::dbITerm*>> comb_by_owner;
+  for (odb::dbITerm* it : comb_active) {
+    comb_by_owner.emplace(owner_index.at(it), it);
+  }
+  for (odb::dbITerm* it : comb_retired) {
+    comb_by_owner.emplace(owner_index.at(it), it);
+  }
+
+  // Steal-candidate index for the last-resort path, built once (O(total
+  // pins), same order as the rest of this function's one-time setup) so
+  // the fallback itself never re-scans the whole design. net_sink_count
+  // is a live per-net sink count (only ever decremented, as repairs steal
+  // from it); comb_stealable/seq_stealable list every currently-connected,
+  // non-power/ground input/inout pin, split the same way as comb_by_owner
+  // — lazily validated at pop time against net_sink_count rather than kept
+  // eagerly in sync, since a linear "remove every other member when a net
+  // drops below 2 sinks" would itself cost O(net size) per steal.
+  std::unordered_map<odb::dbNet*, int> net_sink_count;
+  std::set<std::pair<int, odb::dbITerm*>> comb_stealable;
+  std::vector<odb::dbITerm*> seq_stealable;
+  for (int owner = 0; owner < n; ++owner) {
+    for (odb::dbITerm* it : insts[owner]->getITerms()) {
+      const odb::dbSigType st = it->getSigType();
+      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
+        continue;
+      }
+      const auto io = it->getIoType().getValue();
+      if (io != odb::dbIoType::INPUT && io != odb::dbIoType::INOUT) {
+        continue;
+      }
+      odb::dbNet* net = it->getNet();
+      if (net == nullptr) {
+        continue;  // unconnected; already covered by comb_by_owner/seq_pool
+      }
+      ++net_sink_count[net];
+      if (inst_is_seq[owner]) {
+        seq_stealable.push_back(it);
+      } else {
+        comb_stealable.emplace(owner, it);
+      }
+    }
+  }
+
+  int repaired = 0;
+  for (int i = n - 1; i >= 0 && (spec.num_nets < 0 || nets_made < spec.num_nets);
+       --i) {
+    if (has_connection[i]) {
+      continue;
+    }
+    odb::dbITerm* out = nullptr;
+    for (odb::dbITerm* it : insts[i]->getITerms()) {
+      const odb::dbSigType st = it->getSigType();
+      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
+        continue;
+      }
+      if (it->getIoType() == odb::dbIoType::OUTPUT) {
+        out = it;
+        break;
+      }
+    }
+    if (out == nullptr) {
+      continue;  // no signal output at all; nothing this pass can repair
+    }
+
+    const bool seq_driver = inst_is_seq[i] != 0;
+
+    odb::dbITerm* receiver = nullptr;
+    // comb_by_owner first (order-scarce, only useful to THIS driver and
+    // later ones) — seq_pool last (universally usable, so it is reserved
+    // for whichever dangling driver has no other option). A comb-owned
+    // entry can never be owned by a sequential i (comb_by_owner holds only
+    // combinational instances' inputs), so the only ordering rule to
+    // enforce here is the DAG one: for a combinational i, only owner > i
+    // is valid, which is exactly "the largest owner currently in the set
+    // exceeds i" since the set is sorted by owner. A sequential i has no
+    // restriction at all — any entry qualifies.
+    if (!comb_by_owner.empty()) {
+      const auto last = std::prev(comb_by_owner.end());
+      if (seq_driver || last->first > i) {
+        receiver = last->second;
+        comb_by_owner.erase(last);
+      }
+    }
+    if (receiver == nullptr && !seq_pool.empty()) {
+      // seq_pool holds every sequential instance's inputs, including i's
+      // own if i itself is sequential — the only case self-exclusion can
+      // matter here, and only when the pool's single remaining entry (or
+      // its back element) happens to be i's own pin; handled by scanning
+      // for a non-self entry, which never runs in the (overwhelmingly
+      // common) non-self-conflict case.
+      if (!seq_driver || owner_index.at(seq_pool.back()) != i) {
+        receiver = seq_pool.back();
+        seq_pool.pop_back();
+      } else {
+        for (size_t idx = 0; idx + 1 < seq_pool.size(); ++idx) {
+          if (owner_index.at(seq_pool[idx]) != i) {
+            receiver = seq_pool[idx];
+            seq_pool[idx] = seq_pool.back();
+            seq_pool.pop_back();
+            break;
+          }
+        }
+      }
+    }
+    if (receiver == nullptr) {
+      // Last resort: every remaining unconnected eligible input pin is
+      // already spoken for. Steal a non-last sink of an existing
+      // multi-sink net (the donor net always keeps >=1 remaining sink)
+      // rather than leave this instance dangling. comb_stealable is
+      // consulted the same way comb_by_owner is above — pop the
+      // largest-owner entry; if it fails the DAG check (owner <= i for a
+      // combinational i), stop without discarding it, since a smaller i
+      // later in this (descending) scan may still need it. An entry that
+      // clears the DAG check but is stale (its donor net has already been
+      // stolen down to 1 sink by an earlier repair) is discarded
+      // permanently — net_sink_count only ever decreases, so it can never
+      // become steal-eligible again.
+      while (!comb_stealable.empty()) {
+        const auto last = std::prev(comb_stealable.end());
+        const int owner = last->first;
+        if (!seq_driver && owner <= i) {
+          break;
+        }
+        odb::dbITerm* cand = last->second;
+        comb_stealable.erase(last);
+        const auto cnt = net_sink_count.find(cand->getNet());
+        if (cnt != net_sink_count.end() && cnt->second >= 2) {
+          receiver = cand;
+          --cnt->second;
+          break;
+        }
+      }
+      // seq_stealable has no DAG ordering to respect, only a rare
+      // self-conflict (i itself sequential, candidate owned by i) — set
+      // those aside and restore them, since they remain valid for future
+      // repairs even though they are not usable for this one.
+      if (receiver == nullptr) {
+        std::vector<odb::dbITerm*> set_aside;
+        while (!seq_stealable.empty()) {
+          odb::dbITerm* cand = seq_stealable.back();
+          seq_stealable.pop_back();
+          const auto cnt = net_sink_count.find(cand->getNet());
+          if (cnt == net_sink_count.end() || cnt->second < 2) {
+            continue;  // stale, permanently discarded
+          }
+          if (seq_driver && owner_index.at(cand) == i) {
+            set_aside.push_back(cand);
+            continue;
+          }
+          receiver = cand;
+          --cnt->second;
+          break;
+        }
+        for (odb::dbITerm* it : set_aside) {
+          seq_stealable.push_back(it);
+        }
+      }
+    }
+    if (receiver == nullptr) {
+      // Should not be reachable given the design's total sink-pin supply —
+      // kept as a defensive backstop, not a routine outcome.
+      if (logger != nullptr) {
+        logger->warn(utl::UKN, kMsgNoDanglingInfeasible,
+                     "formNetsAcyclic: instance {} has no connected output "
+                     "and no eligible receiver exists anywhere to repair "
+                     "it with",
+                     insts[i]->getName());
+      }
+      return -1;
+    }
+    odb::dbNet* net = builder.makeNet("n" + std::to_string(nets_made));
+    out->connect(net);
+    receiver->connect(net);  // implicitly detaches receiver from any donor
+    has_connection[i] = 1;
+    ++nets_made;
+    ++repaired;
+  }
+
   if (logger != nullptr) {
     debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,
                "formNetsAcyclic: {} nets ({} below min_fanout at the thin "
                "tail of the order, {} drivers skipped with no eligible "
-               "receiver{})",
-               nets_made, loosened, skipped,
+               "receiver, {} instances repaired to avoid dangling){}",
+               nets_made, loosened, skipped, repaired,
                peak_enabled
                    ? ", " + std::to_string(cluster_nets_made)
                          + " peak-cluster nets"
@@ -1837,8 +2092,16 @@ int generateStatistical(NetlistBuilder& builder,
   // keeps the original shuffled-pool formNets). cluster_id is threaded
   // through unconditionally — Stage E1's sub-cluster Rent computation below
   // needs it regardless of whether the caller asked for out_cluster_id.
+  // A -1 return is a genuine generation failure (insufficient sequential
+  // sink capacity to guarantee every combinational driver connects, per the
+  // no-dangling-instance invariant) — propagate immediately, same as any
+  // other generateStatistical failure, skipping the tolerance check and
+  // Stage E1 entirely.
   std::vector<int> cluster_id;
   const int nets_made = formNetsAcyclic(builder, insts, spec, rng, &cluster_id);
+  if (nets_made < 0) {
+    return -1;
+  }
   if (out_cluster_id != nullptr) {
     *out_cluster_id = cluster_id;
   }

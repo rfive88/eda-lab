@@ -3,9 +3,12 @@
 // order doubles as a topological order), the sequential_ratio > 0
 // bootstrap-source validation, the documented bootstrap/tail behavior when
 // the eligible receiver pool runs thin (loosened receiver counts / skipped
-// drivers, never a sinkless net), and the end-to-end CLI check that written
-// DEF output round-trips loop-free. Needs EDA_LAB_DATA_DIR (Nangate45 LEF
-// fixtures) and NETLISTGEN_CLI_BIN (the built CLI binary path).
+// drivers, never a sinkless net), the guaranteed-instance-connectivity
+// repair pass that follows (every instance ends up with >= 1 connected
+// output, even one the main statistical pass skipped), and the end-to-end
+// CLI check that written DEF output round-trips loop-free. Needs
+// EDA_LAB_DATA_DIR (Nangate45 LEF fixtures) and NETLISTGEN_CLI_BIN (the
+// built CLI binary path).
 
 #include <array>
 #include <cstdio>
@@ -134,6 +137,36 @@ void expectSaneFanouts(odb::dbBlock* block, int max_fanout)
   }
 }
 
+// The guaranteed-instance-connectivity invariant (README.md's "Guaranteed
+// instance connectivity" section): every instance has at least one
+// connected signal OUTPUT iterm. formNetsAcyclic's thin-tail skip can leave
+// a driver with no net at all after the main statistical pass; its repair
+// pass exists specifically to close that gap before returning, so this
+// should hold for every generated design, not just typical ones.
+void expectNoDanglingInstances(odb::dbBlock* block)
+{
+  for (odb::dbInst* inst : block->getInsts()) {
+    bool has_signal_output = false;
+    bool connected = false;
+    for (odb::dbITerm* iterm : inst->getITerms()) {
+      if (iterm->getIoType() != odb::dbIoType::OUTPUT) {
+        continue;
+      }
+      const odb::dbSigType st = iterm->getSigType();
+      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
+        continue;
+      }
+      has_signal_output = true;
+      if (iterm->getNet() != nullptr) {
+        connected = true;
+        break;
+      }
+    }
+    EXPECT_TRUE(!has_signal_output || connected)
+        << "instance " << inst->getName() << " is dangling";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Detector sanity: a hand-built two-inverter loop must be reported as cyclic
 // (guards the loop-freedom tests below against a vacuous pass).
@@ -194,6 +227,7 @@ void expectLoopFreeSynthetic(int num_insts, uint32_t seed)
   EXPECT_FALSE(hasCombinationalCycle(nb.block()))
       << "insts " << num_insts << " seed " << seed;
   expectSaneFanouts(nb.block(), spec.max_fanout);
+  expectNoDanglingInstances(nb.block());
 
   // Hypergraph::buildFromBlock consumes the acyclic block unmodified.
   Hypergraph hg;
@@ -229,6 +263,7 @@ TEST(LoopFreedomTest, LefBackedMultiSeed)
     ASSERT_GT(nets, 0) << "seed " << seed;
     EXPECT_FALSE(hasCombinationalCycle(nb.block())) << "seed " << seed;
     expectSaneFanouts(nb.block(), spec.max_fanout);
+    expectNoDanglingInstances(nb.block());
   }
 }
 

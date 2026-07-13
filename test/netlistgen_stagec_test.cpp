@@ -148,6 +148,30 @@ TEST(ValidationTest, FlagsSinklessNet)
   EXPECT_NE(v.message.find("no sinks"), std::string::npos) << v.message;
 }
 
+// Instance-level check: an instance whose output is never connected to any
+// net at all (not even a sinkless one — no net exists for this pin) is a
+// dangling instance, flagged independently of the net-centric checks above,
+// which cannot see a driver pin that was never assigned a net in the first
+// place. u1 feeds u0's input so the net-level checks all pass; u0's own
+// output is left unconnected.
+TEST(ValidationTest, FlagsDanglingInstance)
+{
+  NetlistBuilder nb("danglinst");
+  odb::dbMaster* inv = nb.makeMaster("INV", 1, 1);
+  odb::dbInst* u0 = nb.makeInst(inv, "u0");
+  odb::dbInst* u1 = nb.makeInst(inv, "u1");
+  odb::dbNet* net = nb.makeNet("n0");
+  ASSERT_TRUE(NetlistBuilder::connect(u1, "o0", net));
+  ASSERT_TRUE(NetlistBuilder::connect(u0, "i0", net));
+  // u0's own output ("o0") is deliberately left unconnected.
+
+  const NetlistValidation v = validateNetlist(nb.block());
+  EXPECT_FALSE(v.ok);
+  EXPECT_NE(v.message.find("u0"), std::string::npos) << v.message;
+  EXPECT_NE(v.message.find("dangling instance"), std::string::npos)
+      << v.message;
+}
+
 // ---------------------------------------------------------------------------
 // DEF / .odb writers
 // ---------------------------------------------------------------------------

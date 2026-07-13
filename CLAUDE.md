@@ -365,6 +365,19 @@ rule (`T = k·Gᵖ`). Structural Verilog output is Stage E2 — see
   relax this). The legacy weighted `masters` mix keeps unconstrained
   shuffled-pool pairing (no acyclicity guarantee). Scale: ~500k insts /
   ~1.4M pins in about 2s.
+  - **Guaranteed instance connectivity**: every instance ends up with >= 1
+    connected output — as hard an invariant as loop-freedom. The ordered
+    statistical draw above can, by its own thin-tail design, skip a driver
+    with zero eligible receivers (no net formed); a second, separate repair
+    pass then gives every such instance exactly one receiver (still
+    respecting the DAG rule, still never touching a live driver — prefer
+    leftover unconnected material, fall back to stealing a non-last sink of
+    a multi-sink net), built on O(log n)/amortized-O(1) structures so it
+    scales to the same instance counts as the rest of the engine. An
+    earlier, discarded design reserved one receiver per instance up front;
+    it was providably correct but measurably thinned the general sampling
+    pool enough to distort peak-cluster fanout targets — see README.md's
+    "Guaranteed instance connectivity" section for the numbers.
   - **Peak fanout sub-clusters** (optional, congestion hot-spots for
     validating downstream metrics tooling): `assignPeakClusters` groups a
     subset of instances into clusters once per run, and cluster-driven nets
@@ -383,7 +396,9 @@ rule (`T = k·Gᵖ`). Structural Verilog output is Stage E2 — see
     (repairing a dead-output instance), falling back to adding one more
     sink onto any existing net. `netlist_validation.cpp` folds `dbBTerm`s
     into its driver/sink tally so every generated net — fresh or augmented
-    — validates under the same rule. `netlistgen` still never touches the
+    — validates under the same rule, and separately walks every `dbInst` to
+    enforce the guaranteed-instance-connectivity invariant above as a hard
+    gate. `netlistgen` still never touches the
     `Hypergraph` engine — `RentStats` returns raw `dbNet*`/`dbInst*` lists
     (`hgm.is_pi`/`is_po` are naturally hyperedge planes,
     `is_boundary_buf`/`is_boundary_reg` vertex planes, but building them is

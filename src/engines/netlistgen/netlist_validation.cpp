@@ -68,6 +68,37 @@ void tallyBTerms(odb::dbNet* net, NetTally& tally)
   }
 }
 
+// Instance-level well-formedness: every instance's output(s) must actually
+// drive something (dbSigType::POWER/GROUND pins are ignored, same as the
+// net-level tallies above). Returns true and leaves `message` untouched if
+// `inst` has at least one connected signal OUTPUT iterm, or has no signal
+// output at all (nothing this check applies to). Returns false with a
+// message naming the instance if every signal output is unconnected (a
+// dangling/dead-logic instance).
+bool instanceHasConnectedOutput(odb::dbInst* inst, std::string& message)
+{
+  bool has_signal_output = false;
+  for (odb::dbITerm* iterm : inst->getITerms()) {
+    if (iterm->getIoType() != odb::dbIoType::OUTPUT) {
+      continue;
+    }
+    const odb::dbSigType st = iterm->getSigType();
+    if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
+      continue;
+    }
+    has_signal_output = true;
+    if (iterm->getNet() != nullptr) {
+      return true;
+    }
+  }
+  if (!has_signal_output) {
+    return true;  // no signal output pin at all; nothing to check
+  }
+  message = "instance '" + std::string(inst->getName())
+            + "' has no connected output (dangling instance)";
+  return false;
+}
+
 }  // namespace
 
 NetlistValidation validateNetlist(odb::dbBlock* block)
@@ -98,6 +129,15 @@ NetlistValidation validateNetlist(odb::dbBlock* block)
       result.ok = false;
       result.message =
           "net '" + name + "' has no sinks (driver with nothing to drive)";
+      return result;
+    }
+  }
+
+  for (odb::dbInst* inst : block->getInsts()) {
+    std::string message;
+    if (!instanceHasConnectedOutput(inst, message)) {
+      result.ok = false;
+      result.message = message;
       return result;
     }
   }

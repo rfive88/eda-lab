@@ -280,8 +280,9 @@ comb→comb edge therefore satisfies `driver index < receiver index` — a DAG b
 construction. Thin-pool behavior is deterministic and documented in
 README.md: a net whose eligible pool cannot cover `min_fanout` is loosened
 (≥ 1 receiver, counted + debug-logged); a driver with zero eligible
-receivers is skipped entirely (no net — never a sinkless net, never a
-stall).
+receivers is skipped entirely in THIS pass (no net — never a sinkless net,
+never a stall) — `has_connection[i]` records whether *any* output pin of
+instance `i` got a net here, feeding the repair pass below.
 
 If `spec.peak_avg_fanout` is set, `assignPeakClusters` runs once up front
 (see its own diagram below) and the per-net logic gains one more branch —
@@ -289,15 +290,15 @@ covered separately below so this diagram stays the un-clustered baseline.
 
 ```mermaid
 graph TD
-  fill["for each inst i, for each iterm:<br/>skip POWER/GROUND + non-INPUT/INOUT<br/>seq inst -> seq_pool<br/>comb inst -> comb_active (+active_pos)"] --> loop{"i = 0..n-1, net cap not hit?"}
-  loop -->|done| summary["debug: nets / loosened / skipped counts<br/>return nets_made"]
+  fill["for each inst i, for each iterm:<br/>skip POWER/GROUND + non-INPUT/INOUT<br/>seq inst -> seq_pool<br/>comb inst -> comb_active (+active_pos, +owner_index)"] --> loop{"i = 0..n-1, net cap not hit?"}
+  loop -->|done| repairpass["no-dangling-instance repair pass<br/>(see below)"]
   loop --> retire["retire inst i's unused comb inputs:<br/>comb_active -> comb_retired"]
   retire --> outs["for each OUTPUT pin of inst i"]
   outs --> elig["eligible = seq_pool + comb_active<br/>+ comb_retired if seq driver"]
   elig --> zero{"eligible == 0?"}
   zero -->|yes| skipd["skip driver (no net); ++skipped"]
   zero -->|no| draw["want = pick_fanout(rng)<br/>k = min(want, eligible)"]
-  draw --> mk["makeNet n{k}; connect driver"]
+  draw --> mk["makeNet n{k}; connect driver<br/>has_connection[i] = true"]
   mk --> sample["k times: uniform index into pool union<br/>swap-remove; connect sink"]
   sample --> loose{"k < min_fanout?"}
   loose -->|yes| cnt["++loosened (trace-logged)"]
@@ -305,6 +306,58 @@ graph TD
   cnt --> next
   skipd --> loop
   next --> loop
+```
+
+### No-dangling-instance repair pass
+
+Runs once the loop above finishes, before `formNetsAcyclic` returns. See
+README.md's "Guaranteed instance connectivity" section for the full
+rationale (including a discarded earlier design — an up-front per-instance
+reservation — and the measurement that ruled it out: it dragged a
+peak-cluster design's achieved fanout down to roughly half its target by
+permanently shrinking the general sampling pool for every instance, not
+just the ones actually at risk).
+
+Two data structures make the repair itself efficient at the instance counts
+this engine targets (an O(n) scan per repaired instance, times up to n
+repairs, would be O(n²)):
+
+- `comb_by_owner` — every remaining `comb_active`/`comb_retired` iterm,
+  keyed by owner instance index in a `std::set`. "Does a combinational input
+  at index `> i` still exist" is then a single lookup at the set's maximum.
+- `net_sink_count` + `comb_stealable`/`seq_stealable` — a one-time,
+  O(total pins) scan builds a live per-net sink count and two candidate
+  lists (owner-sorted comb / plain-list sequential) of every currently
+  *connected* input pin, for the stealing fallback. Candidates are
+  validated lazily at pop time against `net_sink_count` (which only ever
+  decreases) — a stale candidate (its donor net already stolen down to one
+  sink) is discarded permanently, never rescanned.
+
+The outer scan runs `i = n-1` down to `0` — **reverse** creation order — so
+the most constrained instance (the very last one, which has zero
+higher-index candidates and so depends on `seq_pool` alone) gets first pick
+of the shared, universally-usable `seq_pool` before earlier, less
+constrained dangling drivers are even considered.
+
+```mermaid
+graph TD
+  setup["build comb_by_owner (owner-sorted)<br/>build net_sink_count + comb_stealable/seq_stealable"] --> loop{"i = n-1 downto 0<br/>net cap not hit?"}
+  loop -->|done| done2["debug: nets/loosened/skipped/repaired counts<br/>return nets_made"]
+  loop --> hasconn{"has_connection[i]?"}
+  hasconn -->|yes| loop
+  hasconn -->|no| findout{"inst i has a<br/>signal OUTPUT pin?"}
+  findout -->|no| loop
+  findout -->|yes| tryowner["comb_by_owner: take max entry<br/>if seq driver OR owner > i"]
+  tryowner --> gotowner{"found?"}
+  gotowner -->|yes| mkrep["makeNet; connect driver + receiver<br/>has_connection[i] = true; ++repaired"]
+  gotowner -->|no| tryseq["seq_pool: pop back<br/>(skip self-owned entry if i is sequential)"]
+  tryseq --> gotseq{"found?"}
+  gotseq -->|yes| mkrep
+  gotseq -->|no| steal["steal fallback:<br/>comb_stealable then seq_stealable,<br/>lazily discarding stale entries,<br/>decrement net_sink_count on success"]
+  steal --> gotsteal{"found?"}
+  gotsteal -->|yes| mkrep
+  gotsteal -->|no| fail["warn + return -1<br/>(should be unreachable)"]
+  mkrep --> loop
 ```
 
 ## `netlistgen.cpp` — peak fanout sub-clusters (optional, layered on Stage D)
@@ -468,7 +521,7 @@ sequenceDiagram
   HG-->>Caller: hypergraph view
 ```
 
-## `netlist_validation.cpp` — well-formedness check (Stage C; bTerm-aware since Stage E1)
+## `netlist_validation.cpp` — well-formedness check (Stage C; bTerm-aware since Stage E1; instance check added alongside Stage D's repair pass)
 
 `validateNetlist(block)` walks every `dbNet` and tallies its connected
 terminals by IoType (power/ground skipped by `dbSigType`) — `dbITerm`s via
@@ -482,6 +535,13 @@ exactly why Stage E1's primary-input realization *replaces* a selected net's
 existing driver instead of adding the PI bTerm alongside it — see
 `netlist_validation.h` and the netlistgen README's "Primary I/O generation
 (Stage E1)" section.
+
+Once every net passes, a second loop (`instanceHasConnectedOutput`) walks
+every `dbInst` and confirms at least one of its signal `OUTPUT` iterms has a
+non-null net — a check the net-centric tallies above cannot express, since
+they never see a driver pin that was never connected to any net at all.
+This is the hard gate `formNetsAcyclic`'s no-dangling-instance repair pass
+(see its own section above) exists to satisfy.
 
 ```mermaid
 graph TD
@@ -497,7 +557,13 @@ graph TD
   d1 -->|no| s1{"sinks < 1?"}
   s1 -->|yes| fsnk["fail: 'no sinks'"]
   s1 -->|no| loop
-  loop --> okv
+  loop --> instloop["for each dbInst"]
+  instloop --> hasout{"has a signal<br/>OUTPUT iterm at all?"}
+  hasout -->|no| instloop
+  hasout -->|yes| anyconn{"any OUTPUT iterm<br/>has getNet() != null?"}
+  anyconn -->|no| fdanglinst["fail: 'instance dangling'"]
+  anyconn -->|yes| instloop
+  instloop --> okv
 ```
 
 ## `netlist_writers.cpp` — DEF / `.odb` output (Stage C)

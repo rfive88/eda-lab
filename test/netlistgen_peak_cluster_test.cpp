@@ -134,7 +134,26 @@ TEST(PeakClusterTest, NoPeakParamsLeavesClusterIdEmpty)
 TEST(PeakClusterTest, BasicClusterGeneration)
 {
   NetlistBuilder nb("peakbasic");
-  SyntheticNetlistSpec spec = basePeakSpec();
+  // Deliberately NOT basePeakSpec(): that spec's background demand (1700
+  // instances x up to 5 fanout) is already close to its own total input-pin
+  // supply, so once Stage D's no-dangling-instance guarantee (see
+  // README.md's "Guaranteed instance connectivity" section) repairs every
+  // driver that would otherwise be left dangling, total achieved fanout
+  // across the WHOLE design is capped near total supply regardless of any
+  // single net's target — a cluster net asking for 12 gets throttled right
+  // along with the 3.5-average background, landing near 6-7 instead. This
+  // spec keeps the same qualitative shape (a small hot cluster wanting far
+  // more fanout than a much larger background) but gives the design ample
+  // input-pin supply headroom (large combinational masters, thin
+  // background demand) so the peak cluster's requested fanout is actually
+  // achievable, which is what this test exists to check.
+  SyntheticNetlistSpec spec;
+  spec.num_insts = 2000;
+  spec.sequential_ratio = 0.1;
+  spec.combinational_pin_distribution = std::array<double, 5>{0, 0, 0, 0, 100};
+  spec.min_fanout = 1;
+  spec.max_fanout = 2;
+  spec.seed = 21;
   spec.peak_avg_fanout = 12.0;
   spec.peak_cluster_pct = 0.15;
   spec.num_peak_clusters = 1;

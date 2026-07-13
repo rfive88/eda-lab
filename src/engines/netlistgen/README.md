@@ -117,13 +117,16 @@ eligible pool runs thin — typically the *tail* of the creation order, where
 a combinational driver's only remaining candidates are unused sequential
 inputs — the net is **loosened**: it is formed with fewer receivers than
 `min_fanout` (always ≥ 1), counted and debug-logged. A driver with **zero**
-eligible receivers forms **no net at all** (skipped, counted and
-debug-logged) — never a sinkless net, never a stall or retry loop.
-Loosening was chosen over fail-fast because a thin tail is a structural
-certainty of the ordered filter (the last combinational instance in order
-*never* has later combinational candidates), so failing would make many
-perfectly reasonable configs unusable; a shorter tail net keeps the run
-deterministic, well-formed, and honest about what was feasible.
+eligible receivers forms **no net at all** in this pass (skipped, counted
+and debug-logged) — never a sinkless net, never a stall or retry loop. That
+skip is not the end of the story for that driver, though — see "Guaranteed
+instance connectivity" below, which repairs every such driver afterward so
+it never actually ends up dangling. Loosening was chosen over fail-fast
+because a thin tail is a structural certainty of the ordered filter (the
+last combinational instance in order *never* has later combinational
+candidates), so failing would make many perfectly reasonable configs
+unusable; a shorter tail net keeps the run deterministic, well-formed, and
+honest about what was feasible.
 
 **Expected distribution shift vs the Stage B baseline** (known structural
 effect, not a regression): the *cell mix* is untouched (instances are rolled
@@ -135,7 +138,85 @@ only-sequential candidates remain and are consumed — e.g. the 1500-inst
 LEF-backed manual config produced 1007 nets with every fanout in [2, 5] and
 mean 3.55, where unconstrained pairing had run the sink pool to exhaustion),
 a possible handful of **below-`min_fanout` tail nets** at small scale, and
-correspondingly **more input pins left unconnected**.
+correspondingly **more input pins left unconnected** (until the repair pass
+below claims some of them).
+
+### Guaranteed instance connectivity
+
+**Every instance ends up with at least one connected output — a hard,
+universal invariant, exactly as strict as "no multiply-driven nets" or "no
+sinkless nets."** `validateNetlist` (see "Net well-formedness validation"
+below) enforces this as a gate independent of net-formation itself: a
+driver whose signal output(s) are all unconnected is dead logic (in a real
+flow it would be deleted, cascading backward through anything that fed only
+it, silently shrinking the design away from whatever Rent's-rule/instance-
+count targets the run asked for) — a stricter requirement than mere
+combinational-loop-freedom, since the "thin-pool" skip above, left alone,
+can and does leave a driver with no net at all.
+
+The mechanism is a **second pass, not a change to the statistical draw
+above.** `formNetsAcyclic` runs the ordinary, unrestricted forward pass
+exactly as described above (identical pool mechanics, identical skip
+behavior for a driver with zero eligible receivers), tracking only one extra
+bit per instance — did *any* of its output pins get connected. Once that
+pass completes, a **repair pass** walks every instance that still has none
+and gives it exactly one receiver, respecting the same DAG rule the forward
+pass enforces (a combinational driver may only feed a combinational input
+at index `> i`, or any sequential input; a sequential driver may feed
+anything but itself) and never touching a live driver:
+
+1. Prefer still-unconnected material — combinational inputs at index `> i`
+   (whatever the forward pass left in `comb_active`/`comb_retired`), then
+   any unconnected sequential input (`seq_pool`).
+2. Falling back to **stealing** a non-last sink of an already multi-sink net
+   (the donor net always keeps ≥ 1 remaining sink) only once no leftover
+   material exists at all — the same "add or reuse, never delete-and-
+   cascade" philosophy Stage E1's PI/PO wiring uses (see below).
+
+**Two ordering rules make this provably safe rather than a race between
+dangling drivers competing for the same scarce material:**
+- Within a single repair, order-scarce candidates (combinational inputs at
+  index `> i` — useful only to this driver and later ones) are always tried
+  **before** `seq_pool` (universally usable by *any* dangling driver,
+  combinational or sequential, any index) — so a driver with its own option
+  never needlessly spends the one resource a more-constrained driver may
+  depend on entirely.
+- The repair pass itself walks instances in **reverse** creation order
+  (`n-1` down to `0`). The last instance in the design is the most
+  constrained one there is (zero later-index candidates, so `seq_pool` is
+  its *only* option) — it must get first pick of `seq_pool` while it is
+  fullest, before earlier — and therefore less constrained — dangling
+  drivers are even considered.
+
+**Performance:** this repair must scale to the same hundreds-of-thousands-
+of-instances designs the rest of this engine does, so it is built on O(log
+n) / amortized-O(1) structures rather than a linear scan per repaired
+instance: combinational candidates are held in one `std::set` keyed by
+owner index (so "does anything with owner `> i` still exist" is a single
+lookup at the tree's max), and the stealing fallback is backed by a
+one-time-built, live per-net sink-count map plus two candidate pools (again
+comb-owned/sequential-owned) that are validated **lazily** at pop time —
+a candidate whose donor net has already been stolen down to a single sink
+is discarded permanently (net sink counts only ever fall), never rescanned.
+
+**Why not reserve a receiver for every instance up front instead** (the
+first design tried here, discarded): a deterministic reverse scan can
+provably guarantee a valid, order-respecting receiver for every
+combinational instance *before* generation even starts, using nothing more
+than the pre-existing `sequential_ratio > 0` bootstrap rule — no stricter
+ratio floor is mathematically required, contrary to an earlier, buggy
+implementation of that scheme that concluded one was. But reserving one
+input pin **per instance** removes that much capacity from the general
+statistical draw for the *entire* run, regardless of whether that specific
+instance would ever actually have gone dangling — and most would not have.
+Measured impact: on a 2000-instance peak-fanout-cluster design (see "Peak
+fanout sub-clusters" above) targeting `peak_avg_fanout = 12`, the
+reservation approach dragged the achieved cluster average down to ~6.3 —
+roughly half the target, well outside even a generous tolerance — because
+it permanently removed close to a third of the design's total input-pin
+supply before a single statistical draw ran. The repair-pass design above
+leaves the statistical draw completely untouched and only pays the
+repair cost for instances that actually need it.
 
 ## Peak fanout sub-clusters
 
@@ -458,29 +539,50 @@ validation error, same treatment as `peak_avg_fanout`.
   (distribution sum, mode exclusivity, target range, non-empty buckets),
   which stay hard failures.
 
-## Net well-formedness validation (Stage C)
+## Net well-formedness validation (Stage C, extended in Stage E1)
 
 `validateNetlist(block)` (`netlist_validation.h`) is a defensive, structural
 correctness check — **independent of and in addition to** Stage D's
-combinational-loop-freedom guarantee. It walks every `dbNet` and confirms:
+combinational-loop-freedom guarantee. It walks every `dbNet`, then every
+`dbInst`, and confirms:
 
-- **Exactly one driver** — exactly one connected `dbITerm` with
-  `IoType::OUTPUT`. Zero or more than one is a failure.
-- **At least one sink** — at least one connected `dbITerm` with
-  `IoType::INPUT` (`INOUT` counts as a sink too). Zero sinks is a failure
-  (a driver with nothing to drive — dangling).
-- **No dangling nets** — a net with zero connected iterms is a failure.
+- **Exactly one driver** per net — exactly one connected terminal that
+  supplies a signal: a `dbITerm` with `IoType::OUTPUT`, or (since Stage E1)
+  a `dbBTerm` with `IoType::INPUT` (a primary input feeds the design from
+  outside, so it drives the net from the internal design's perspective).
+  Zero or more than one is a failure.
+- **At least one sink** per net — at least one connected terminal that
+  consumes the signal: a `dbITerm` with `IoType::INPUT`/`INOUT`, or a
+  `dbBTerm` with `IoType::OUTPUT`/`INOUT`. Zero sinks is a failure (a
+  driver with nothing to drive — dangling).
+- **No dangling nets** — a net with zero connected terminals (iterms or
+  bterms) is a failure.
+- **No dangling instances** — every instance's output(s) must actually
+  drive something. An instance whose signal `OUTPUT` iterm(s) are *all*
+  unconnected (`dbITerm::getNet() == nullptr`) is dead logic and fails
+  validation, exactly as strictly as the net-level checks above (see
+  "Guaranteed instance connectivity" above for why this matters and how
+  `formNetsAcyclic`'s repair pass keeps it from firing in the first place).
+  Checked instance-by-instance, independently of the net-level tallies —
+  those are net-centric and cannot see a driver pin that was never
+  connected to any net at all. An instance with no signal output pin at
+  all trivially passes (nothing for this check to apply to).
 
-Power/ground iterms (`dbSigType::POWER`/`GROUND`) are ignored; classification
-is **IoType-based** (the Stage A refactor), never name-based. It returns a
-`NetlistValidation { bool ok; std::string message; }` naming the first
-offending net. This is a **hard** structural property — unlike the statistical
-`distribution_tolerance_pct` checks, which are sampling-noise warnings. This
-stage considers only `dbITerm`s (no primary ports yet); the per-net tally is
-factored so Stage E can fold primary-input/-output `dbBTerm`s into the same
-driver/sink counts. The CLI runs this automatically after generation and
-**refuses to write any output if it fails** (fail-fast); Stage 3 test code or
-other callers can invoke it directly on their own blocks.
+Power/ground terminals (`dbSigType::POWER`/`GROUND`) are ignored on both
+iterms and bterms; classification is **IoType-based** (the Stage A
+refactor), never name-based. Stage E1 folds `dbBTerm`s into the *same*
+per-net tally as `dbITerm`s (`tallyITerms`/`tallyBTerms`, two small
+symmetric helpers) rather than a parallel rule — this is why Stage E1's
+primary-input realization *replaces* a selected net's existing internal
+driver rather than adding the PI bTerm alongside it (once bTerms count
+toward the driver tally, "additional driver" would always fail). It
+returns a `NetlistValidation { bool ok; std::string message; }` naming the
+first offending net or instance. This is a **hard** structural property —
+unlike the statistical `distribution_tolerance_pct` checks, which are
+sampling-noise warnings. The CLI runs this automatically after generation
+and **refuses to write any output if it fails** (fail-fast, reported before
+the final design-summary statistics print); Stage 3 test code or other
+callers can invoke it directly on their own blocks.
 
 ## DEF / `.odb` writers (Stage C)
 

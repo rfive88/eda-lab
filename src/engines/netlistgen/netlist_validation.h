@@ -17,6 +17,14 @@
 //     Zero sinks is a failure (a driver with nothing to drive — dangling).
 //   - No dangling nets: a net with zero connected terminals (iterms or
 //     bterms) is a failure.
+//   - No dangling instances: every instance's output(s) must actually drive
+//     something. An instance whose signal OUTPUT iterm(s) are all
+//     unconnected (dbITerm::getNet() == nullptr) is dead logic and fails
+//     validation, exactly as strictly as a multiply-driven or sinkless net.
+//     Checked instance-by-instance (independent of the net-level tallies
+//     above, which are net-centric and cannot see a driver pin that was
+//     never connected to any net at all). An instance with no signal output
+//     pin at all (nothing for this check to apply to) trivially passes.
 //
 // Power/ground terminals (dbSigType POWER/GROUND) are ignored on both
 // iterms and bterms — neither drivers nor sinks for this signal-
@@ -50,9 +58,10 @@ struct NetlistValidation
   std::string message;
 };
 
-// Walk every dbNet in `block` and confirm the well-formedness invariants
-// above. Returns on the first violation with a message identifying the net.
-// A null block or a block with no nets is considered valid (nothing to check).
+// Walk every dbNet, then every dbInst, in `block` and confirm the
+// well-formedness invariants above. Returns on the first violation with a
+// message identifying the offending net or instance. A null block or a
+// block with no nets/instances is considered valid (nothing to check).
 NetlistValidation validateNetlist(odb::dbBlock* block);
 
 }  // namespace eda

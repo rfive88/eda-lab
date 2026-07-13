@@ -17,28 +17,38 @@
 //     Zero sinks is a failure (a driver with nothing to drive — dangling).
 //   - No dangling nets: a net with zero connected terminals (iterms or
 //     bterms) is a failure.
-//   - No dangling instances: every instance's output(s) must actually drive
-//     something. An instance whose signal OUTPUT iterm(s) are all
-//     unconnected (dbITerm::getNet() == nullptr) is dead logic and fails
-//     validation, exactly as strictly as a multiply-driven or sinkless net.
-//     Checked instance-by-instance (independent of the net-level tallies
-//     above, which are net-centric and cannot see a driver pin that was
-//     never connected to any net at all). An instance with no signal output
-//     pin at all (nothing for this check to apply to) trivially passes.
+//   - No dangling instances: every instance's DATA output(s) must actually
+//     drive something. "Data output" follows the D/Q-only sequential pin
+//     convention (isDataPin in netlistgen.h): a sequential instance is
+//     alive only through its Q — a connected clock output or QN does not
+//     count. An instance whose data OUTPUT iterm(s) are all unconnected
+//     (dbITerm::getNet() == nullptr) is dead logic and fails validation,
+//     exactly as strictly as a multiply-driven or sinkless net. Checked
+//     instance-by-instance (independent of the net-level tallies above,
+//     which are net-centric and cannot see a driver pin that was never
+//     connected to any net at all). An instance with no data output pin at
+//     all (nothing for this check to apply to) trivially passes.
+//   - No control pins on nets (the D/Q-only sequential pin constraint,
+//     added by the well-formedness audit): every dbITerm connected to any
+//     net must be a data pin per isDataPin — a connected clock, async
+//     set/reset, scan-enable, or other non-SIGNAL/control pin fails
+//     validation, naming the pin and its instance. Runs last, after the
+//     dangling-instance check, so an instance alive only through a control
+//     pin is reported as dangling (the more fundamental defect) first.
 //
 // Power/ground terminals (dbSigType POWER/GROUND) are ignored on both
 // iterms and bterms — neither drivers nor sinks for this signal-
 // connectivity check. Classification is IoType-based (the Stage A
-// refactor), never name-based.
+// refactor); only the control-pin check is additionally name-aware, via
+// isDataPin, because libraries like Nangate45 tag control pins USE SIGNAL.
 //
 // Stage E1 folds dbBTerms into the SAME tally as dbITerms (tallyITerms /
 // tallyBTerms are two small, symmetric helpers feeding one NetTally) rather
 // than adding a parallel rule — a net with a bTerm is judged by exactly the
-// same "exactly one driver, >=1 sink" invariant as any other net. This is
-// why Stage E1's primary-input realization REPLACES a selected net's
-// existing internal driver rather than adding the PI bTerm alongside it:
-// once bTerms count toward the driver tally, "additional driver" would
-// always fail this check (two drivers, real-world designs never have that).
+// same "exactly one driver, >=1 sink" invariant as any other net. (A PI's
+// net is always freshly built from never-connected or stolen sink pins —
+// never an existing net's driver — so the single-driver rule holds; see
+// netlistgen.h's Stage E1 notes.)
 
 #pragma once
 

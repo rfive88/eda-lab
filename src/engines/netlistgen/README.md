@@ -16,7 +16,11 @@ topology, then feed them to `Hypergraph::buildFromBlock()`.
 > DEF / `.odb` output is genuinely valid — well-formed *and* acyclic. **Stage
 > E1 (this stage, `docs/briefs/spike-netlistgen-E1-io-rent.md`)** adds
 > primary input/output port generation governed by **Rent's rule**
-> (see "Primary I/O generation (Stage E1)" below). Still landing later:
+> (see "Primary I/O generation (Stage E1)" below). The **well-formedness
+> audit** (`docs/briefs/spike-netlistgen-wellformed-audit.md`) then added
+> the D/Q-only sequential pin constraint (see "The D/Q-only sequential pin
+> convention" below), hardened `validateNetlist` with a control-pin check,
+> and made a too-low `num_nets` cap a hard error. Still landing later:
 > - **Stage E2** — structural Verilog output (a separate brief).
 >
 > Note: Stage E1 does **not** relax the `sequential_ratio > 0` bootstrap
@@ -70,7 +74,10 @@ Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
 
   Net formation classifies terminals **by IoType, with power/ground pins
   excluded by `dbSigType`** (drivers = `OUTPUT`, sinks = `INPUT`/`INOUT`),
-  and every iterm lands on at most one net. The two regimes then differ:
+  and every iterm lands on at most one net. On the statistical path, pin
+  eligibility is further restricted by the **D/Q-only sequential pin
+  convention** (see the section below): only `isDataPin` pins ever join a
+  net. The two regimes then differ:
   - **Statistical mix** uses the Stage D **ordered, acyclic-by-construction**
     formation (`formNetsAcyclic` — see "Combinational-loop avoidance" below).
   - **Legacy weighted mix** keeps the original shuffled-pool pairing
@@ -80,6 +87,51 @@ Two layers, both in `netlistgen.h` / `netlistgen.cpp`:
     sequential/combinational classification to build a DAG order from.
 
   Returns the net count, or **`-1`** if the spec fails validation.
+
+## The D/Q-only sequential pin convention
+
+**Only the data pins of a sequential (flip-flop) cell participate in
+data-net connectivity: its D input(s) as sinks, its Q output as driver.
+Every other pin — clock, async set/reset, scan-enable/test control,
+scan-out, the inverted output QN — is left permanently unconnected in the
+generated netlist.** Clock/reset/scan are global signals in a real flow;
+they must never appear as signal-net endpoints in a synthetic netlist.
+Enforced by construction everywhere pins are selected, and as a hard
+`validateNetlist` gate (see "Net well-formedness validation" below).
+
+The single source of truth is **`isDataPin(dbMTerm*)`** (`netlistgen.h`),
+shared by the Stage B/D receiver pools and driver picks, the Stage D
+dangling-instance repair pass, Stage E1's PI/PO target-pin pools, and
+`validateNetlist`'s control-pin check. Pools are filtered through it
+**before any random sampling begins** — an ineligible pin can never be
+drawn, stolen, or repaired onto a net. A pin is a data pin iff:
+
+1. **Sig-type gate:** its `dbSigType` is `SIGNAL`. `CLOCK`/`RESET`/`SCAN`/
+   `ANALOG`/`POWER`/`GROUND`/`TIEOFF` pins are never connected, regardless
+   of direction.
+2. **Name rule, sequential masters only:** if its master is sequential
+   (`isSequentialMaster`), its name must not be a conventional control-pin
+   name. Needed because libraries like Nangate45 tag *every* pin
+   `USE SIGNAL`, so a flip-flop's CK/RN/SN/SE/QN are indistinguishable from
+   data by sig type alone. Excluded (case-insensitive): clock
+   (`CK`/`CLK`/`CLOCK`/`CP`), async set/reset (`RN`/`SN`/`R`/`S`/`RESET`/
+   `SET`/`CLR`/`CLEAR`/`PRE`/`PRESET`), scan-enable/test (`SE`/`TE`/`TM`),
+   scan-out (`SO`), and the inverted output (`QN`). **Scan-in `SI` is NOT
+   excluded** — it is a data path (muxed behind scan-enable) and is treated
+   the same as D. Because the name rule applies to sequential masters only,
+   combinational pins that reuse these letters (e.g. `FA_X1`'s sum output
+   `S`) are unaffected.
+
+Per mode:
+
+- **LEF-backed mode (Nangate45):** a DFF's data endpoints are exactly `D`,
+  `SI` (scan variants), and `Q`; `CK`, `RN`, `SN`, `SE`, and `QN` stay
+  unconnected.
+- **Synthetic mode:** the sequential representative (`makeMaster` with
+  `clocked = true`) has pins `i0` (its clock, `dbSigType::CLOCK` — caught by
+  the sig-type gate alone), `i1` (its D pin, the only data sink) and `o0`
+  (its Q pin, the only data driver). Synthetic FFs model no other pins —
+  they are structural skeletons, not real cells.
 
 ## Combinational-loop avoidance (Stage D)
 
@@ -94,9 +146,11 @@ driver/receiver class without a rewrite):
 
 - **Sequential (Q) outputs are always-valid drivers**, regardless of order —
   a register output is the loop-breaker.
-- **Sequential inputs (D/CK) are always-valid sinks** — a D pin may depend
-  on nets that transitively depend on its own Q; that is a legitimate
-  sequential feedback loop, not a combinational one.
+- **Sequential DATA inputs (D, and SI where a library has one) are
+  always-valid sinks** — a D pin may depend on nets that transitively depend
+  on its own Q; that is a legitimate sequential feedback loop, not a
+  combinational one. (Clock and other control pins are never sinks at all —
+  see "The D/Q-only sequential pin convention" above.)
 - **A combinational output at index `i` may only drive** sequential-instance
   inputs (any index) or combinational-instance inputs at indices **`> i`**
   (instances not yet processed). Never an earlier combinational instance,
@@ -143,11 +197,14 @@ below claims some of them).
 
 ### Guaranteed instance connectivity
 
-**Every instance ends up with at least one connected output — a hard,
+**Every instance ends up with at least one connected DATA output — a hard,
 universal invariant, exactly as strict as "no multiply-driven nets" or "no
-sinkless nets."** `validateNetlist` (see "Net well-formedness validation"
+sinkless nets."** ("Data output" per the D/Q-only convention above: a
+sequential instance is alive only through its Q — a connected QN would not
+count, and could not occur anyway since generation never connects one.)
+`validateNetlist` (see "Net well-formedness validation"
 below) enforces this as a gate independent of net-formation itself: a
-driver whose signal output(s) are all unconnected is dead logic (in a real
+driver whose data output(s) are all unconnected is dead logic (in a real
 flow it would be deleted, cascading backward through anything that fed only
 it, silently shrinking the design away from whatever Rent's-rule/instance-
 count targets the run asked for) — a stricter requirement than mere
@@ -172,6 +229,16 @@ anything but itself) and never touching a live driver:
    (the donor net always keeps ≥ 1 remaining sink) only once no leftover
    material exists at all — the same "add or reuse, never delete-and-
    cascade" philosophy Stage E1's PI/PO wiring uses (see below).
+
+**The invariant is unconditional — a `num_nets` cap cannot buy it off.** If
+`spec.num_nets` is set so low that a dangling instance cannot be repaired
+without exceeding the cap, generation **fails fast** (`generateSynthetic`
+returns `-1`, with a warning naming the first unrepairable instance and the
+cap), rather than silently leaving the instance dangling as "deliberate
+truncation": a config that cannot produce a well-formed netlist is an
+invalid config. The CLI then exits nonzero, writes no output files, and
+prints no statistics. (The legacy weighted-mix path keeps its original
+truncating cap — it makes no connectivity guarantee of any kind.)
 
 **Two ordering rules make this provably safe rather than a race between
 dangling drivers competing for the same scarce material:**
@@ -557,25 +624,37 @@ combinational-loop-freedom guarantee. It walks every `dbNet`, then every
   driver with nothing to drive — dangling).
 - **No dangling nets** — a net with zero connected terminals (iterms or
   bterms) is a failure.
-- **No dangling instances** — every instance's output(s) must actually
-  drive something. An instance whose signal `OUTPUT` iterm(s) are *all*
-  unconnected (`dbITerm::getNet() == nullptr`) is dead logic and fails
-  validation, exactly as strictly as the net-level checks above (see
-  "Guaranteed instance connectivity" above for why this matters and how
-  `formNetsAcyclic`'s repair pass keeps it from firing in the first place).
-  Checked instance-by-instance, independently of the net-level tallies —
-  those are net-centric and cannot see a driver pin that was never
-  connected to any net at all. An instance with no signal output pin at
-  all trivially passes (nothing for this check to apply to).
+- **No dangling instances** — every instance's DATA output(s) must actually
+  drive something. "Data output" follows the D/Q-only convention
+  (`isDataPin`): a sequential instance is alive only through its Q — a
+  connected QN or clock output does not count. An instance whose data
+  `OUTPUT` iterm(s) are *all* unconnected (`dbITerm::getNet() == nullptr`)
+  is dead logic and fails validation, exactly as strictly as the net-level
+  checks above (see "Guaranteed instance connectivity" above for why this
+  matters and how `formNetsAcyclic`'s repair pass keeps it from firing in
+  the first place). Checked instance-by-instance, independently of the
+  net-level tallies — those are net-centric and cannot see a driver pin
+  that was never connected to any net at all. An instance with no data
+  output pin at all trivially passes (nothing for this check to apply to).
+- **No control pins on nets** (the D/Q-only sequential pin constraint,
+  added by the well-formedness audit,
+  `docs/briefs/spike-netlistgen-wellformed-audit.md`) — every `dbITerm`
+  connected to any net must be a data pin per `isDataPin`; a connected
+  clock, async set/reset, scan-enable, or other non-`SIGNAL`/control pin
+  fails validation, naming the pin and its instance. Runs **last**, after
+  the dangling-instance check, so an instance kept "alive" only through a
+  control pin is reported as dangling (the more fundamental defect) first.
 
 Power/ground terminals (`dbSigType::POWER`/`GROUND`) are ignored on both
 iterms and bterms; classification is **IoType-based** (the Stage A
-refactor), never name-based. Stage E1 folds `dbBTerm`s into the *same*
+refactor) — only the two `isDataPin`-based checks are additionally
+name-aware, because libraries like Nangate45 tag control pins `USE SIGNAL`.
+Stage E1 folds `dbBTerm`s into the *same*
 per-net tally as `dbITerm`s (`tallyITerms`/`tallyBTerms`, two small
-symmetric helpers) rather than a parallel rule — this is why Stage E1's
-primary-input realization *replaces* a selected net's existing internal
-driver rather than adding the PI bTerm alongside it (once bTerms count
-toward the driver tally, "additional driver" would always fail). It
+symmetric helpers) rather than a parallel rule — a PI's net is always
+freshly built from never-connected or stolen sink pins, never an existing
+net's driver, so the single-driver rule holds unchanged (see "Two
+deliberate deviations" above). It
 returns a `NetlistValidation { bool ok; std::string message; }` naming the
 first offending net or instance. This is a **hard** structural property —
 unlike the statistical `distribution_tolerance_pct` checks, which are
@@ -631,7 +710,7 @@ never into the `netlistgen` library). The schema is a serialization of
 |------------|---------|-------|
 | `instance_count` | `spec.num_insts` | **Required**, `> 0`. |
 | `seed` | `spec.seed` | Optional. |
-| `net_count` | `spec.num_nets` | `null`/absent → `-1` (as many as pools allow). |
+| `net_count` | `spec.num_nets` | `null`/absent → `-1` (as many as pools allow). A cap too low to connect every instance is a hard generation error (nonzero exit, no output files). |
 | `fanout_range` `{min,max}` | `spec.min_fanout` / `max_fanout` | Optional. Load pins per net (fanout), driver excluded. |
 | `tech_lef_path` | `spec.tech_lef_path` | Optional; engages LEF mode. |
 | `cell_lef_paths` | `spec.cell_lef_paths` | Optional array. |
@@ -761,7 +840,7 @@ invalid spec). Consumed downstream by `Hypergraph::buildFromBlock()`.
 |-------|------|---------|---------|
 | `masters` | `std::vector<MasterSpec>` | — | Legacy weighted mix (ignored in statistical mode). |
 | `num_insts` | `int` | `0` (must be `> 0`) | Number of instances. |
-| `num_nets` | `int` | `-1` | Net cap; `-1` = as many as the pin pools allow. |
+| `num_nets` | `int` | `-1` | Net cap; `-1` = as many as the pin pools allow. In statistical mode a cap too low to give every instance a connected output is a **hard error** (`-1` returned), never silent truncation. |
 | `min_fanout` / `max_fanout` | `int` | `2` / `4` | Load pins per net (fanout), driver excluded. |
 | `seed` | `uint32_t` | `1` | RNG seed; fixes output for a given spec. |
 | `tech_lef_path` | `std::optional<std::string>` | unset | If set, load real tech (and its macros) via `lefin`. |
@@ -846,7 +925,8 @@ if (eda::validateNetlist(nb.block()).ok) {     // structural well-formedness
 cmake -B build
 cmake --build build --target netlistgen_test netlistgen_stageb_test \
       netlistgen_stagec_test netlistgen_staged_test netlistgen_peak_cluster_test \
-      netlistgen_rent_test netlistgen_link_smoke netlistgen_cli
+      netlistgen_rent_test netlistgen_wellformed_test netlistgen_link_smoke \
+      netlistgen_cli
 ctest --test-dir build -R "netlistgen" --output-on-failure
 ```
 
@@ -913,6 +993,21 @@ ctest --test-dir build -R "netlistgen" --output-on-failure
   warn-and-clamp case, bad `io_pin_type_distribution` sum, out-of-range
   `io_input_ratio`, legacy-mix rejection); and a small-design `T`-capping
   run that completes without crashing.
+- `test/netlistgen_wellformed_test.cpp` — the well-formedness audit
+  (`docs/briefs/spike-netlistgen-wellformed-audit.md`; needs
+  `EDA_LAB_DATA_DIR`): `isDataPin` unit coverage (synthetic
+  representatives; a hand-built all-`USE SIGNAL` scan FF where only the
+  name rule separates D/SI/Q from CK/RN/SE/QN; a combinational full-adder
+  lookalike whose `S` output must be unaffected); D/Q-only end to end in
+  LEF-backed and synthetic mode with Stage E1 engaged (every connected
+  iterm is a data pin, sequential connections limited to D/SI/Q resp.
+  i1/o0, clock pins never connected); the repair pass under an
+  all-sequential tight-fanout config that forces it to run; the
+  validateNetlist hardening (a connected QN does not save a dangling Q; a
+  CLOCK-typed iterm on an otherwise valid net fails, naming pin and
+  instance); and the `num_nets` cap policy (too-low cap → `-1` from
+  `generateSynthetic`; the in-process CLI exits nonzero and writes no
+  output file; a generous cap still succeeds).
 - `test/netlistgen_link_smoke.cpp` — library-linkage guard.
 
 Scale reference: ~500k insts / ~1.4M pins generate in about 2 s (synthetic).

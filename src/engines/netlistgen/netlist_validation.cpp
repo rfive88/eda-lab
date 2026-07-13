@@ -2,6 +2,7 @@
 
 #include "engines/netlistgen/netlist_validation.h"
 
+#include "engines/netlistgen/netlistgen.h"  // isDataPin (D/Q-only convention)
 #include "odb/db.h"
 
 namespace eda {
@@ -68,31 +69,30 @@ void tallyBTerms(odb::dbNet* net, NetTally& tally)
   }
 }
 
-// Instance-level well-formedness: every instance's output(s) must actually
-// drive something (dbSigType::POWER/GROUND pins are ignored, same as the
-// net-level tallies above). Returns true and leaves `message` untouched if
-// `inst` has at least one connected signal OUTPUT iterm, or has no signal
+// Instance-level well-formedness: every instance's DATA output(s) must
+// actually drive something. "Data output" is exactly isDataPin's D/Q-only
+// rule — a connected clock output or a connected QN does NOT save a
+// sequential instance whose Q dangles, because only data pins participate
+// in data-net connectivity. Returns true and leaves `message` untouched if
+// `inst` has at least one connected data OUTPUT iterm, or has no data
 // output at all (nothing this check applies to). Returns false with a
-// message naming the instance if every signal output is unconnected (a
+// message naming the instance if every data output is unconnected (a
 // dangling/dead-logic instance).
 bool instanceHasConnectedOutput(odb::dbInst* inst, std::string& message)
 {
-  bool has_signal_output = false;
+  bool has_data_output = false;
   for (odb::dbITerm* iterm : inst->getITerms()) {
-    if (iterm->getIoType() != odb::dbIoType::OUTPUT) {
+    if (iterm->getIoType() != odb::dbIoType::OUTPUT
+        || !isDataPin(iterm->getMTerm())) {
       continue;
     }
-    const odb::dbSigType st = iterm->getSigType();
-    if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
-      continue;
-    }
-    has_signal_output = true;
+    has_data_output = true;
     if (iterm->getNet() != nullptr) {
       return true;
     }
   }
-  if (!has_signal_output) {
-    return true;  // no signal output pin at all; nothing to check
+  if (!has_data_output) {
+    return true;  // no data output pin at all; nothing to check
   }
   message = "instance '" + std::string(inst->getName())
             + "' has no connected output (dangling instance)";
@@ -139,6 +139,28 @@ NetlistValidation validateNetlist(odb::dbBlock* block)
       result.ok = false;
       result.message = message;
       return result;
+    }
+  }
+
+  // Final check (the D/Q-only sequential pin constraint): no control pin —
+  // clock, async set/reset, scan-enable, or any other non-data pin per
+  // isDataPin — may be connected to any net. Generation leaves these pins
+  // unconnected by construction; a connected one is a generation bug (or a
+  // hand-built block violating the convention). Runs after the dangling-
+  // instance check so a sequential instance kept "alive" only through a
+  // non-data pin is reported as dangling (the more fundamental defect)
+  // rather than as a control-pin violation.
+  for (odb::dbNet* net : block->getNets()) {
+    for (odb::dbITerm* iterm : net->getITerms()) {
+      if (!isDataPin(iterm->getMTerm())) {
+        result.ok = false;
+        result.message = "net '" + std::string(net->getName())
+                         + "' is connected to non-data pin '"
+                         + iterm->getMTerm()->getName() + "' on instance '"
+                         + std::string(iterm->getInst()->getName())
+                         + "' (control/clock pins must stay unconnected)";
+        return result;
+      }
     }
   }
   return result;

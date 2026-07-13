@@ -125,6 +125,18 @@ target_link_libraries(netlistgen_rent_test PRIVATE netlistgen hypergraph odb
                                                    utl GTest::gtest
                                                    GTest::gtest_main)
 
+# Well-formedness audit: the D/Q-only sequential pin constraint (isDataPin),
+# validateNetlist's data-output dangling rule + control-pin-on-net check, and
+# the num_nets-cap hard error. Links netlistgen_cli_core for the in-process
+# runCliFromFile "no output files on generation error" case.
+add_executable(netlistgen_wellformed_test test/netlistgen_wellformed_test.cpp)
+target_compile_definitions(netlistgen_wellformed_test
+                           PRIVATE EDA_LAB_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
+target_link_libraries(netlistgen_wellformed_test PRIVATE netlistgen_cli_core
+                                                         netlistgen odb utl
+                                                         GTest::gtest
+                                                         GTest::gtest_main)
+
 add_executable(fm_partitioner_test test/fm_partitioner_test.cpp)
 target_compile_definitions(fm_partitioner_test
                            PRIVATE EDA_LAB_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
@@ -166,6 +178,7 @@ add_test(NAME netlistgen_stagec_test COMMAND netlistgen_stagec_test)
 add_test(NAME netlistgen_staged_test COMMAND netlistgen_staged_test)
 add_test(NAME netlistgen_peak_cluster_test COMMAND netlistgen_peak_cluster_test)
 add_test(NAME netlistgen_rent_test COMMAND netlistgen_rent_test)
+add_test(NAME netlistgen_wellformed_test COMMAND netlistgen_wellformed_test)
 add_test(NAME fm_partitioner_test COMMAND fm_partitioner_test)
 add_test(NAME cli_help_test COMMAND cli_help_test)
 add_test(NAME error_handling_test COMMAND error_handling_test)

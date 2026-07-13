@@ -9,9 +9,20 @@ function `generateSynthetic()`, which fills a builder's block from a
 and a driver: the DEF / `.odb` writers (`netlist_writers.h/.cpp`), the net
 well-formedness check (`netlist_validation.h/.cpp`), and a standalone
 JSON-driven CLI (`cli_config.h/.cpp`, `netlistgen_cli.cpp`). This reflects the
-code as of Stage E1 (LEF-backed generation + statistical cell mix +
-max-entropy solve + writers + validation + CLI + acyclic net formation + peak
-fanout sub-clusters + primary I/O generation via Rent's rule).
+code as of Stage E1 plus the well-formedness audit (LEF-backed generation +
+statistical cell mix + max-entropy solve + writers + validation + CLI +
+acyclic net formation + peak fanout sub-clusters + primary I/O generation via
+Rent's rule + the D/Q-only sequential pin constraint).
+
+**The D/Q-only sequential pin convention** (the well-formedness audit,
+`docs/briefs/spike-netlistgen-wellformed-audit.md`): only a sequential
+cell's data pins (D, scan-in SI, Q) ever join a net; clock, async
+set/reset, scan-enable/test, scan-out, and QN stay permanently
+unconnected. One predicate, `isDataPin(dbMTerm*)`, is the single source of
+truth, applied when the Stage B/D pools are built (before any sampling),
+in the Stage D repair pass, in Stage E1's PI/PO pools, and as
+`validateNetlist`'s final control-pin check. See README.md's "The D/Q-only
+sequential pin convention".
 
 **Combinational-loop freedom (Stage D).** Statistical-mix net formation is
 **acyclic by construction**: `formNetsAcyclic` reuses the instance creation
@@ -36,13 +47,13 @@ DAG/loop-freedom guarantee above is completely unaffected.
 **Primary I/O generation via Rent's rule (Stage E1)**, `applyPrimaryIoStageE1`
 — a separate pass over the already-formed `dbBlock`, run once
 `formNetsAcyclic` returns (see its own section below). Sizes a target PI/PO
-terminal count from `T = k·Gᵖ`, randomly samples that many nets to become
-boundary-visible, and inserts combinational/buffered/registered pin types.
-The one hard invariant this pass must preserve — "exactly one driver per
-net" (`validateNetlist`, now `dbBTerm`-aware) — is why a PI **replaces**
-its selected net's existing driver rather than being added "alongside" it
-(see the section below for the full rationale); a PO has no such conflict
-(one more sink/observer on an already-driven net is always fine). Reuses
+terminal count from `T = k·Gᵖ` and inserts
+combinational/buffered/registered pin types. Two hard invariants this pass
+must preserve — "exactly one driver per net" and "no dangling instances"
+(`validateNetlist`, now `dbBTerm`-aware) — are why **neither PI nor PO ever
+touches a live driver**: a PI builds a fresh net from leftover or stolen
+sink pins; a PO claims a leftover output pin or adds one more sink to an
+existing net (see the section below for the full rationale). Reuses
 Stage E1's already-assigned `cluster_id` (if peak fanout sub-clusters are
 also engaged) for per-cluster + background Rent statistics. `netlistgen`
 never touches the `Hypergraph` engine (unchanged since Stage A) — Stage E1
@@ -52,8 +63,9 @@ planes; see its section below.
 ## `netlistgen.h` — API surface
 
 Declares the two layers, the spec structs, and the shared statistical-mix
-helpers (`signalPinCount`, `isSequentialMaster`, `validateSpecConfig`,
-`maxEntropyDistribution`, `assignPeakClusters`). No logic in the header.
+helpers (`signalPinCount`, `isSequentialMaster`, `isDataPin`,
+`validateSpecConfig`, `maxEntropyDistribution`, `assignPeakClusters`). No
+logic in the header.
 
 ```mermaid
 graph TD
@@ -70,7 +82,7 @@ graph TD
   subgraph API
     NB[class NetlistBuilder<br/>makeMaster / makeInst / makeNet / connect<br/>loadLef / masters / estimateDieArea<br/>block / db / logger]
     GS["generateSynthetic(builder, spec,<br/>out_cluster_id?, out_rent_stats?) -> int<br/>(-1 on invalid spec)"]
-    H[helpers: signalPinCount<br/>isSequentialMaster<br/>validateSpecConfig<br/>maxEntropyDistribution<br/>assignPeakClusters]
+    H[helpers: signalPinCount<br/>isSequentialMaster / isDataPin<br/>validateSpecConfig<br/>maxEntropyDistribution<br/>assignPeakClusters]
   end
   SP -->|input| GS
   NB -->|populated by| GS
@@ -132,7 +144,13 @@ flags a non-clocked master with a level-sensitive gate/enable pin
 (`isLatchEnablePinName` = `G`/`GN`) — a latch, dropped entirely.
 `isClockGateMaster` flags a master driving a gated-clock output
 (`isGatedClockPinName` = `GCK`/`GCLK`/`ECK`) — a clock gate, also dropped even
-though it has a clock pin. `bucketIndex` maps a signal-pin count to bucket 0..4.
+though it has a clock pin. `isDataPin` implements the D/Q-only convention:
+sig type must be `SIGNAL`, and on a sequential master the name must not be
+a clock (`isClockPinName`) or control pin (`isSequentialControlPinName` =
+`RN`/`SN`/`R`/`S`/`RESET`/`SET`/`CLR`/`CLEAR`/`PRE`/`PRESET`/`SE`/`TE`/`TM`/
+`SO`/`QN`; scan-in `SI` deliberately absent — it is a data path). Hot loops
+memoise it per `dbMTerm` via `DataPinMemo`. `bucketIndex` maps a signal-pin
+count to bucket 0..4.
 `maxEntropyDistribution` bisects a single `theta` so the tilted distribution's
 mean hits the target.
 
@@ -144,6 +162,13 @@ graph TD
     seqd["isSequentialMaster(master)"] --> anyck["any mterm SigType == CLOCK<br/>OR INPUT pin named CK/CLK/CLOCK/CP?"]
     latd["isLatchMaster(master)"] --> anyg["no clock pin AND<br/>INPUT pin named G/GN?"]
     cgd["isClockGateMaster(master)"] --> anygck["OUTPUT pin named GCK/GCLK/ECK?"]
+    idp["isDataPin(mterm)"] --> sig{"SigType == SIGNAL?"}
+    sig -->|no| nd["false (clock/reset/scan/pg...)"]
+    sig -->|yes| seqm{"master sequential?"}
+    seqm -->|no| yd["true"]
+    seqm -->|yes| nm{"name a clock or<br/>control-pin name?"}
+    nm -->|yes| nd
+    nm -->|no| yd
     bi["bucketIndex(pins)"] --> bmap["pins<2 -> -1<br/>pins>=6 -> 4<br/>else pins-2"]
   end
 
@@ -260,12 +285,16 @@ graph TD
 The statistical mix ends here instead. Instance creation order (`u0..u{n-1}`)
 doubles as a topological order over the combinational cells; drivers are
 processed in that same order and receiver *eligibility* is filtered while the
-receiver *count* stays governed by `[min_fanout, max_fanout]`. Three receiver
-pools carry the eligibility state:
+receiver *count* stays governed by `[min_fanout, max_fanout]`. Every pool
+entry and every driver pick is filtered through `isDataPin` (memoised via
+`DataPinMemo`) **before any sampling happens**, so a clock/reset/scan pin
+can never appear on a net — not from the main draw, not from the repair
+pass. Three receiver pools carry the eligibility state:
 
-- `seq_pool` — unused sequential-instance inputs (D/CK). Eligible for
-  **every** driver: register inputs accept any source (feedback through a
-  register is sequential, not combinational).
+- `seq_pool` — unused sequential-instance DATA inputs (D, and SI where a
+  library has one; never CK/RN/SE). Eligible for **every** driver: register
+  inputs accept any source (feedback through a register is sequential, not
+  combinational).
 - `comb_active` — unused combinational inputs whose owner instance has **not
   been processed yet** (index > current `i`). Eligible for every driver.
 - `comb_retired` — unused combinational inputs whose owner **has** been
@@ -290,10 +319,10 @@ covered separately below so this diagram stays the un-clustered baseline.
 
 ```mermaid
 graph TD
-  fill["for each inst i, for each iterm:<br/>skip POWER/GROUND + non-INPUT/INOUT<br/>seq inst -> seq_pool<br/>comb inst -> comb_active (+active_pos, +owner_index)"] --> loop{"i = 0..n-1, net cap not hit?"}
+  fill["for each inst i, for each iterm:<br/>skip non-data (isDataPin: power/ground,<br/>clock, sequential control) + non-INPUT/INOUT<br/>seq inst -> seq_pool<br/>comb inst -> comb_active (+active_pos, +owner_index)"] --> loop{"i = 0..n-1, net cap not hit?"}
   loop -->|done| repairpass["no-dangling-instance repair pass<br/>(see below)"]
   loop --> retire["retire inst i's unused comb inputs:<br/>comb_active -> comb_retired"]
-  retire --> outs["for each OUTPUT pin of inst i"]
+  retire --> outs["for each data (isDataPin) OUTPUT pin of inst i<br/>(a sequential inst drives from Q only)"]
   outs --> elig["eligible = seq_pool + comb_active<br/>+ comb_retired if seq driver"]
   elig --> zero{"eligible == 0?"}
   zero -->|yes| skipd["skip driver (no net); ++skipped"]
@@ -339,15 +368,27 @@ higher-index candidates and so depends on `seq_pool` alone) gets first pick
 of the shared, universally-usable `seq_pool` before earlier, less
 constrained dangling drivers are even considered.
 
+All candidate structures are `isDataPin`-filtered at build time (control
+pins are never connected, so never stealable), and the driver pin sought
+for a dangling instance is its first data OUTPUT — a sequential instance is
+repaired through its Q, never its QN.
+
+**The `num_nets` cap cannot override the invariant** (Section 6 of the
+well-formedness audit): if a dangling instance is found once the cap is
+already reached, generation fails fast — warn (`UKN-0319`) and return `-1`
+— rather than leaving the instance dangling as "deliberate truncation".
+
 ```mermaid
 graph TD
-  setup["build comb_by_owner (owner-sorted)<br/>build net_sink_count + comb_stealable/seq_stealable"] --> loop{"i = n-1 downto 0<br/>net cap not hit?"}
+  setup["build comb_by_owner (owner-sorted)<br/>build net_sink_count + comb_stealable/seq_stealable<br/>(all isDataPin-filtered)"] --> loop{"i = n-1 downto 0"}
   loop -->|done| done2["debug: nets/loosened/skipped/repaired counts<br/>return nets_made"]
   loop --> hasconn{"has_connection[i]?"}
   hasconn -->|yes| loop
-  hasconn -->|no| findout{"inst i has a<br/>signal OUTPUT pin?"}
+  hasconn -->|no| findout{"inst i has a<br/>data (isDataPin) OUTPUT pin?"}
   findout -->|no| loop
-  findout -->|yes| tryowner["comb_by_owner: take max entry<br/>if seq driver OR owner > i"]
+  findout -->|yes| capchk{"num_nets cap already hit?"}
+  capchk -->|yes| capfail["warn 'net count cap too low;<br/>generation aborted'; return -1"]
+  capchk -->|no| tryowner["comb_by_owner: take max entry<br/>if seq driver OR owner > i"]
   tryowner --> gotowner{"found?"}
   gotowner -->|yes| mkrep["makeNet; connect driver + receiver<br/>has_connection[i] = true; ++repaired"]
   gotowner -->|no| tryseq["seq_pool: pop back<br/>(skip self-owned entry if i is sequential)"]
@@ -430,8 +471,8 @@ driver in the shipped design.
 graph TD
   chk{"rent_k and rent_p both set?"} -->|no| noop["return RentStats{} (engaged=false)"]
   chk -->|yes| t1["Step 1: G=spec.num_insts<br/>p_eff=min(rent_p,1.0)<br/>T=round(rent_k * G^p_eff)"]
-  t1 --> t2["Step 2: build pi_pool = leftover unconnected<br/>INPUT/INOUT iterms + stealable (all-but-first)<br/>sinks of fanout>=2 nets; shuffle(rng)"]
-  t2 --> t2b["build po_pool = leftover unconnected<br/>OUTPUT iterms; shuffle(rng)<br/>snapshot all_nets (PO fallback source)"]
+  t1 --> t2["Step 2: build pi_pool = leftover unconnected<br/>data (isDataPin) INPUT/INOUT iterms + stealable<br/>(all-but-first) sinks of fanout>=2 nets; shuffle(rng)<br/>(without the isDataPin filter the leftover pool<br/>would be full of never-connected control pins)"]
+  t2 --> t2b["build po_pool = leftover unconnected<br/>data OUTPUT iterms (a dangling Q, never a QN);<br/>shuffle(rng)<br/>snapshot all_nets (PO fallback source)"]
   t2b --> cap{"T_in > pi_pool.size()?"}
   cap -->|yes| warn["warn 'E1: T_in (..) exceeds available<br/>PI target pins (..); capping'<br/>T_in = pi_pool.size()"]
   cap -->|no| pi
@@ -470,10 +511,9 @@ graph TD
 ```
 
 `firstOutputIterm`/`firstDataInputIterm` locate a reused master's driver pin
-and its first non-clock data input by IoType/SigType — never by pin name —
-matching the rest of this file's low-level `dbITerm` manipulation style
-(`isClockPinName` catches libraries like Nangate45 that tag `CK` `USE
-SIGNAL`, same fallback `isSequentialMaster` already relies on). New
+(a boundary FF's Q, never its QN) and its first data input (never CK, and —
+since the well-formedness audit — never an async set/reset or scan-enable
+pin either) via IoType plus the shared `isDataPin` predicate. New
 instances/nets continue the existing `u<i>`/`n<i>` naming sequences from the
 internal counts — planes (via `RentStats`, not names) are what distinguish a
 boundary cell from an internal one.
@@ -521,7 +561,7 @@ sequenceDiagram
   HG-->>Caller: hypergraph view
 ```
 
-## `netlist_validation.cpp` — well-formedness check (Stage C; bTerm-aware since Stage E1; instance check added alongside Stage D's repair pass)
+## `netlist_validation.cpp` — well-formedness check (Stage C; bTerm-aware since Stage E1; instance check added alongside Stage D's repair pass; control-pin check added by the well-formedness audit)
 
 `validateNetlist(block)` walks every `dbNet` and tallies its connected
 terminals by IoType (power/ground skipped by `dbSigType`) — `dbITerm`s via
@@ -530,18 +570,28 @@ with IoType `INPUT` counts as a driver — a primary input supplies the net
 from outside; `OUTPUT`/`INOUT` counts as a sink) — both feeding one shared
 `NetTally` before the verdict. This is a distinct guarantee from Stage D's
 loop-freedom: a net can be perfectly well-formed and still sit on a
-combinational cycle. Folding bTerms in here (rather than a parallel rule) is
-exactly why Stage E1's primary-input realization *replaces* a selected net's
-existing driver instead of adding the PI bTerm alongside it — see
-`netlist_validation.h` and the netlistgen README's "Primary I/O generation
-(Stage E1)" section.
+combinational cycle. Folding bTerms in here (rather than a parallel rule)
+works because Stage E1's PI nets are always freshly built from
+never-connected or stolen sink pins — never an existing net's driver — so
+the single-driver rule holds unchanged; see `netlist_validation.h` and the
+netlistgen README's "Primary I/O generation (Stage E1)" section.
 
 Once every net passes, a second loop (`instanceHasConnectedOutput`) walks
-every `dbInst` and confirms at least one of its signal `OUTPUT` iterms has a
-non-null net — a check the net-centric tallies above cannot express, since
-they never see a driver pin that was never connected to any net at all.
-This is the hard gate `formNetsAcyclic`'s no-dangling-instance repair pass
-(see its own section above) exists to satisfy.
+every `dbInst` and confirms at least one of its DATA (`isDataPin`) `OUTPUT`
+iterms has a non-null net — a check the net-centric tallies above cannot
+express, since they never see a driver pin that was never connected to any
+net at all. A connected QN or clock output does not save a sequential
+instance whose Q dangles. This is the hard gate `formNetsAcyclic`'s
+no-dangling-instance repair pass (see its own section above) exists to
+satisfy.
+
+Finally (the D/Q-only constraint, added by the well-formedness audit), a
+third loop re-walks every net's `dbITerm`s and fails on any connected pin
+that is not a data pin per `isDataPin` — a connected clock, async
+set/reset, scan-enable, or other control pin, named together with its
+instance in the message. It runs last so an instance kept "alive" only
+through a control pin is reported as dangling (the more fundamental defect)
+first.
 
 ```mermaid
 graph TD
@@ -558,12 +608,16 @@ graph TD
   s1 -->|yes| fsnk["fail: 'no sinks'"]
   s1 -->|no| loop
   loop --> instloop["for each dbInst"]
-  instloop --> hasout{"has a signal<br/>OUTPUT iterm at all?"}
+  instloop --> hasout{"has a data (isDataPin)<br/>OUTPUT iterm at all?"}
   hasout -->|no| instloop
-  hasout -->|yes| anyconn{"any OUTPUT iterm<br/>has getNet() != null?"}
-  anyconn -->|no| fdanglinst["fail: 'instance dangling'"]
+  hasout -->|yes| anyconn{"any data OUTPUT iterm<br/>has getNet() != null?"}
+  anyconn -->|no| fdanglinst["fail: 'instance dangling'<br/>(a connected QN does not count)"]
   anyconn -->|yes| instloop
-  instloop --> okv
+  instloop --> ctrlloop["for each dbNet, for each iterm"]
+  ctrlloop --> isdata{"isDataPin(mterm)?"}
+  isdata -->|no| fctrl["fail: 'net connected to non-data pin<br/>... on instance ...'"]
+  isdata -->|yes| ctrlloop
+  ctrlloop --> okv
 ```
 
 ## `netlist_writers.cpp` — DEF / `.odb` output (Stage C)

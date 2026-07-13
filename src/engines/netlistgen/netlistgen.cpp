@@ -53,6 +53,7 @@ constexpr int kMsgRentCap = 315;
 constexpr int kMsgRentDegenerate = 316;
 constexpr int kMsgRentSkipped = 317;
 constexpr int kMsgNoDanglingInfeasible = 318;
+constexpr int kMsgNetCapTooLow = 319;
 
 // Implementation constant: fraction of a cluster net's sink slots preferring
 // an intra-cluster receiver over background. Not exposed in the JSON config
@@ -136,6 +137,40 @@ bool isGatedClockPinName(const std::string& name)
   return pinNameIsOneOf(name, {"GCK", "GCLK", "ECK"});
 }
 
+// A sequential cell's non-clock control or non-data pin, by conventional
+// name — everything on a flip-flop that is neither D/SI (data sinks) nor Q
+// (the data driver): async set/reset (Nangate45: RN/SN), scan-enable/test
+// control (SE/TE/TM), scan-out (SO), and the inverted output (QN). Checked
+// ONLY for sequential masters (see isDataPin), so combinational pins that
+// reuse these letters — e.g. FA_X1's sum output S — are never affected.
+bool isSequentialControlPinName(const std::string& name)
+{
+  return pinNameIsOneOf(name, {"RN", "SN", "R", "S", "RESET", "SET", "CLR",
+                               "CLEAR", "PRE", "PRESET", "SE", "TE", "TM",
+                               "SO", "QN"});
+}
+
+// Memoised per-mterm isDataPin filter for hot per-iterm loops (pool
+// construction walks every pin of every instance; isDataPin itself walks
+// the master's mterms via isSequentialMaster and does case-insensitive name
+// matching, so memoise per dbMTerm — masters are few, instances are not).
+class DataPinMemo
+{
+ public:
+  bool operator()(odb::dbITerm* iterm)
+  {
+    odb::dbMTerm* mterm = iterm->getMTerm();
+    const auto [it, inserted] = memo_.try_emplace(mterm, 0);
+    if (inserted) {
+      it->second = isDataPin(mterm) ? 1 : 0;
+    }
+    return it->second != 0;
+  }
+
+ private:
+  std::unordered_map<odb::dbMTerm*, char> memo_;
+};
+
 double meanOfTilt(const std::array<double, kNumCombBuckets>& anchors,
                   double theta)
 {
@@ -207,6 +242,25 @@ bool isClockGateMaster(odb::dbMaster* master)
     }
   }
   return false;
+}
+
+bool isDataPin(odb::dbMTerm* mterm)
+{
+  // Signal-type gate first: CLOCK/RESET/SCAN/ANALOG/POWER/GROUND/TIEOFF pins
+  // never carry data-net connectivity, whatever their direction. This alone
+  // handles the synthetic sequential representative (its clock pin i0 is
+  // dbSigType::CLOCK).
+  if (mterm->getSigType() != odb::dbSigType::SIGNAL) {
+    return false;
+  }
+  // Name-based control-pin exclusion, sequential masters only: libraries
+  // like Nangate45 tag every pin USE SIGNAL, so CK/RN/SN/SE/QN on a
+  // flip-flop are indistinguishable from data by sig type alone.
+  if (!isSequentialMaster(mterm->getMaster())) {
+    return true;
+  }
+  const std::string name = mterm->getName();
+  return !isClockPinName(name) && !isSequentialControlPinName(name);
 }
 
 std::array<double, kNumCombBuckets> maxEntropyDistribution(
@@ -1016,12 +1070,19 @@ int formNetsAcyclic(NetlistBuilder& builder,
   const int n = static_cast<int>(insts.size());
   utl::Logger* logger = builder.logger();
 
-  // Receiver pools. Every entry is an unused non-power/ground INPUT/INOUT
-  // iterm. seq_pool: sequential-instance inputs, eligible for every driver.
-  // comb_active: combinational-instance inputs whose owner has not been
-  // processed yet, eligible for every driver. comb_retired: combinational
-  // inputs whose owner HAS been processed — eligible for sequential drivers
-  // only (a combinational driver may not feed an earlier-or-own instance).
+  // The D/Q-only sequential pin convention (see isDataPin): every pool and
+  // every driver pick below is filtered through this predicate BEFORE any
+  // sampling happens, so clock/reset/scan-control pins can never appear on
+  // a net — not from the main draw, not from the repair pass.
+  DataPinMemo is_data_pin;
+
+  // Receiver pools. Every entry is an unused data-eligible (isDataPin)
+  // INPUT/INOUT iterm. seq_pool: sequential-instance D/SI inputs, eligible
+  // for every driver. comb_active: combinational-instance inputs whose owner
+  // has not been processed yet, eligible for every driver. comb_retired:
+  // combinational inputs whose owner HAS been processed — eligible for
+  // sequential drivers only (a combinational driver may not feed an
+  // earlier-or-own instance).
   std::vector<odb::dbITerm*> seq_pool;
   std::vector<odb::dbITerm*> comb_active;
   std::vector<odb::dbITerm*> comb_retired;
@@ -1062,9 +1123,8 @@ int formNetsAcyclic(NetlistBuilder& builder,
   for (int i = 0; i < n; ++i) {
     inst_is_seq[i] = isSequentialMaster(insts[i]->getMaster()) ? 1 : 0;
     for (odb::dbITerm* iterm : insts[i]->getITerms()) {
-      const odb::dbSigType st = iterm->getSigType();
-      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
-        continue;
+      if (!is_data_pin(iterm)) {
+        continue;  // power/ground, clock, or sequential control pin
       }
       const auto io = iterm->getIoType().getValue();
       if (io != odb::dbIoType::INPUT && io != odb::dbIoType::INOUT) {
@@ -1154,9 +1214,9 @@ int formNetsAcyclic(NetlistBuilder& builder,
       if (spec.num_nets >= 0 && nets_made >= spec.num_nets) {
         break;
       }
-      const odb::dbSigType st = out->getSigType();
-      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND
-          || out->getIoType() != odb::dbIoType::OUTPUT) {
+      // Drivers obey the same D/Q-only rule as receivers: a sequential
+      // instance drives from Q only (QN and any scan-out stay unconnected).
+      if (out->getIoType() != odb::dbIoType::OUTPUT || !is_data_pin(out)) {
         continue;
       }
       size_t eligible = seq_pool.size() + comb_active.size()
@@ -1298,11 +1358,12 @@ int formNetsAcyclic(NetlistBuilder& builder,
   // non-last sink of an already multi-sink net only if no leftover
   // material exists anywhere, mirroring Stage E1's own PI/PO wiring
   // philosophy (see its header comment) applied internally rather than at
-  // the port boundary. A repair never exceeds spec.num_nets: a driver left
-  // dangling purely because the caller's net-count cap truncated
-  // generation before it was ever reached is a deliberate truncation, not
-  // a bug, and is intentionally left for the well-formedness check to
-  // report.
+  // the port boundary. The no-dangling-instance invariant is UNCONDITIONAL:
+  // if spec.num_nets is capped so low that a dangling instance cannot be
+  // repaired without exceeding the cap, generation fails fast (-1, logged)
+  // rather than silently leaving the instance dangling — a config that
+  // cannot produce a well-formed netlist is an invalid config, not a
+  // deliberate truncation.
   // comb_active/comb_retired, indexed by owner instance for O(log n)
   // "does anything with owner > i still exist" queries — a linear scan
   // over these pools per repaired instance would be O(n) each, and with
@@ -1334,9 +1395,8 @@ int formNetsAcyclic(NetlistBuilder& builder,
   std::vector<odb::dbITerm*> seq_stealable;
   for (int owner = 0; owner < n; ++owner) {
     for (odb::dbITerm* it : insts[owner]->getITerms()) {
-      const odb::dbSigType st = it->getSigType();
-      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
-        continue;
+      if (!is_data_pin(it)) {
+        continue;  // control pins are never connected, so never stealable
       }
       const auto io = it->getIoType().getValue();
       if (io != odb::dbIoType::INPUT && io != odb::dbIoType::INOUT) {
@@ -1356,24 +1416,32 @@ int formNetsAcyclic(NetlistBuilder& builder,
   }
 
   int repaired = 0;
-  for (int i = n - 1; i >= 0 && (spec.num_nets < 0 || nets_made < spec.num_nets);
-       --i) {
+  for (int i = n - 1; i >= 0; --i) {
     if (has_connection[i]) {
       continue;
     }
     odb::dbITerm* out = nullptr;
     for (odb::dbITerm* it : insts[i]->getITerms()) {
-      const odb::dbSigType st = it->getSigType();
-      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
-        continue;
-      }
-      if (it->getIoType() == odb::dbIoType::OUTPUT) {
+      if (it->getIoType() == odb::dbIoType::OUTPUT && is_data_pin(it)) {
         out = it;
         break;
       }
     }
     if (out == nullptr) {
-      continue;  // no signal output at all; nothing this pass can repair
+      continue;  // no data output at all; nothing this pass can repair
+    }
+    if (spec.num_nets >= 0 && nets_made >= spec.num_nets) {
+      // Section 6 of the well-formedness audit: the cap made the invariant
+      // unsatisfiable — reject the config rather than emit a dangling
+      // instance.
+      if (logger != nullptr) {
+        logger->warn(utl::UKN, kMsgNetCapTooLow,
+                     "instance {} cannot be given a connected output — net "
+                     "count cap (num_nets = {}) too low; raise num_nets or "
+                     "remove the cap; generation aborted",
+                     insts[i]->getName(), spec.num_nets);
+      }
+      return -1;
     }
 
     const bool seq_driver = inst_is_seq[i] != 0;
@@ -1512,48 +1580,32 @@ enum class IoPinKind
   kRegistered
 };
 
-// First non-power/ground OUTPUT iterm on `inst`, or nullptr. Used to find a
-// freshly-created boundary buffer/FF instance's driver pin (never fails in
-// practice — every comb/seq representative master Stage E1 reuses has at
-// least one signal output, per Stage B's own invariants).
+// First data-eligible (isDataPin) OUTPUT iterm on `inst`, or nullptr — a
+// boundary FF's Q, never its QN. Used to find a freshly-created boundary
+// buffer/FF instance's driver pin (never fails in practice — every comb/seq
+// representative master Stage E1 reuses has a data output, per Stage B's
+// own invariants).
 odb::dbITerm* firstOutputIterm(odb::dbInst* inst)
 {
   for (odb::dbITerm* it : inst->getITerms()) {
-    const odb::dbSigType st = it->getSigType();
-    if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
-      continue;
-    }
-    if (it->getIoType() == odb::dbIoType::OUTPUT) {
+    if (it->getIoType() == odb::dbIoType::OUTPUT && isDataPin(it->getMTerm())) {
       return it;
     }
   }
   return nullptr;
 }
 
-// First non-power/ground, non-clock INPUT/INOUT iterm on `inst` — the "data"
-// input a PI feeds (never the CK pin of a boundary FF). Clock recognition
-// mirrors isSequentialMaster: dbSigType::CLOCK or the conventional-name
-// fallback, both checked at the owning dbMTerm.
+// First data-eligible (isDataPin) INPUT/INOUT iterm on `inst` — the "data"
+// input a PI feeds: never the CK pin of a boundary FF, and (since the D/Q-
+// only audit) never an async set/reset or scan-enable pin either.
 odb::dbITerm* firstDataInputIterm(odb::dbInst* inst)
 {
   for (odb::dbITerm* it : inst->getITerms()) {
-    const odb::dbSigType st = it->getSigType();
-    if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
-      continue;
-    }
     const auto io = it->getIoType().getValue();
-    if (io != odb::dbIoType::INPUT && io != odb::dbIoType::INOUT) {
-      continue;
+    if ((io == odb::dbIoType::INPUT || io == odb::dbIoType::INOUT)
+        && isDataPin(it->getMTerm())) {
+      return it;
     }
-    odb::dbMTerm* mt = it->getMTerm();
-    if (mt->getSigType() == odb::dbSigType::CLOCK) {
-      continue;
-    }
-    if (mt->getIoType() == odb::dbIoType::INPUT
-        && isClockPinName(mt->getName())) {
-      continue;
-    }
-    return it;
   }
   return nullptr;
 }
@@ -1637,16 +1689,17 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
   // moment it's actually drawn). A PI's target net is therefore always
   // freshly built from pool material — an existing net's driver is never
   // touched.
+  // D/Q-only convention: the leftover-pin scan must filter through isDataPin
+  // — Stage D leaves every clock/reset/scan-control pin permanently
+  // unconnected, so without this filter the "leftover" pool would be full of
+  // exactly the pins a PI must never touch.
+  DataPinMemo is_data_pin;
   std::vector<odb::dbITerm*> pi_pool;
   for (odb::dbInst* inst : builder.block()->getInsts()) {
     for (odb::dbITerm* it : inst->getITerms()) {
-      const odb::dbSigType st = it->getSigType();
-      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
-        continue;
-      }
       const auto io = it->getIoType().getValue();
       if ((io == odb::dbIoType::INPUT || io == odb::dbIoType::INOUT)
-          && it->getNet() == nullptr) {
+          && it->getNet() == nullptr && is_data_pin(it)) {
         pi_pool.push_back(it);
       }
     }
@@ -1654,7 +1707,7 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
   for (odb::dbNet* net : builder.block()->getNets()) {
     std::vector<odb::dbITerm*> sinks;
     for (odb::dbITerm* it : net->getITerms()) {
-      if (it->getIoType() != odb::dbIoType::OUTPUT) {
+      if (it->getIoType() != odb::dbIoType::OUTPUT && is_data_pin(it)) {
         sinks.push_back(it);
       }
     }
@@ -1673,11 +1726,10 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
   std::vector<odb::dbITerm*> po_pool;
   for (odb::dbInst* inst : builder.block()->getInsts()) {
     for (odb::dbITerm* it : inst->getITerms()) {
-      const odb::dbSigType st = it->getSigType();
-      if (st == odb::dbSigType::POWER || st == odb::dbSigType::GROUND) {
-        continue;
-      }
-      if (it->getIoType() == odb::dbIoType::OUTPUT && it->getNet() == nullptr) {
+      // isDataPin keeps a sequential instance's QN out of the pool: only a
+      // dangling Q counts as a repairable dead output.
+      if (it->getIoType() == odb::dbIoType::OUTPUT && it->getNet() == nullptr
+          && is_data_pin(it)) {
         po_pool.push_back(it);
       }
     }

@@ -343,7 +343,8 @@ statistical cell mix; Stage C added DEF/`.odb` writers, net well-formedness
 validation, and the JSON-driven `netlistgen_cli`; Stage D made
 statistical-mix net formation combinational-loop-free by construction,
 completing Phase 1; Stage E1 adds primary I/O port generation via Rent's
-rule (`T = k·Gᵖ`). Structural Verilog output is Stage E2 — see
+rule (`T = k·Gᵖ`); the well-formedness audit added the D/Q-only sequential
+pin constraint below. Structural Verilog output is Stage E2 — see
 `src/engines/netlistgen/README.md`. Two core layers:
 
 - **`NetlistBuilder`** owns a fresh `dbDatabase` (tech, lib, chip, top block)
@@ -365,8 +366,19 @@ rule (`T = k·Gᵖ`). Structural Verilog output is Stage E2 — see
   relax this). The legacy weighted `masters` mix keeps unconstrained
   shuffled-pool pairing (no acyclicity guarantee). Scale: ~500k insts /
   ~1.4M pins in about 2s.
+  - **D/Q-only sequential pin constraint** (well-formedness audit): only a
+    sequential cell's data pins — D (and scan-in SI), Q — ever join a net;
+    clock, async set/reset, scan-enable, scan-out, and QN stay permanently
+    unconnected. `isDataPin(dbMTerm*)` is the single source of truth
+    (sig-type gate + name rule on sequential masters only, since Nangate45
+    tags control pins USE SIGNAL), filtering every pool BEFORE sampling
+    (Stage B/D draws, the repair pass, Stage E1's PI/PO pools) and enforced
+    as `validateNetlist`'s final control-pin check. Relatedly, a `num_nets`
+    cap too low to give every instance a connected output is a hard
+    generation error (-1, CLI writes nothing), never silent truncation.
   - **Guaranteed instance connectivity**: every instance ends up with >= 1
-    connected output — as hard an invariant as loop-freedom. The ordered
+    connected DATA output (per `isDataPin` — a connected QN does not count)
+    — as hard an invariant as loop-freedom. The ordered
     statistical draw above can, by its own thin-tail design, skip a driver
     with zero eligible receivers (no net formed); a second, separate repair
     pass then gives every such instance exactly one receiver (still
@@ -410,7 +422,9 @@ Tests: `test/netlistgen_test.cpp` (Stage A, no data files),
 `netlistgen_staged_test.cpp` (loop freedom, bootstrap fail-fast, thin-pool
 behavior, CLI DEF round-trip cycle check),
 `netlistgen_peak_cluster_test.cpp` (peak fanout sub-clusters),
-`netlistgen_rent_test.cpp` (Stage E1 primary I/O generation).
+`netlistgen_rent_test.cpp` (Stage E1 primary I/O generation),
+`netlistgen_wellformed_test.cpp` (D/Q-only constraint, validateNetlist
+hardening, num_nets cap hard error).
 
 ## Partitioning engine (Stages 1–2)
 

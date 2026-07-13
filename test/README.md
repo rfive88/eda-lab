@@ -7,7 +7,7 @@ GTest suites for eda-lab.
 ```bash
 cmake -B build              # Debug tree; build-release/ is the Release tree
 cmake --build build
-ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_stageb_test|netlistgen_stagec_test|netlistgen_staged_test|netlistgen_peak_cluster_test|netlistgen_rent_test|netlistgen_link_smoke|fm_partitioner_test|cli_help_test|error_handling_test" --output-on-failure
+ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_stageb_test|netlistgen_stagec_test|netlistgen_staged_test|netlistgen_peak_cluster_test|netlistgen_rent_test|netlistgen_wellformed_test|netlistgen_link_smoke|fm_partitioner_test|cli_help_test|error_handling_test" --output-on-failure
 ```
 
 The `-R` filter matters: a bare `ctest` also picks up the vendored OpenROAD
@@ -117,6 +117,21 @@ cd run
   `io_pin_type_distribution` sum, out-of-range `io_input_ratio`, legacy-mix
   rejection); and a small-design `T`-capping run that completes without
   crashing.
+- `netlistgen_wellformed_test.cpp` — the well-formedness audit
+  (`docs/briefs/spike-netlistgen-wellformed-audit.md`): the D/Q-only
+  sequential pin constraint and the hardened `validateNetlist` gate. Needs
+  `EDA_LAB_DATA_DIR` (Nangate45 LEF) and links `netlistgen_cli_core` for the
+  in-process CLI case. Covers: `isDataPin` unit behavior (synthetic
+  representatives; a hand-built all-`USE SIGNAL` scan FF where only the name
+  rule separates D/SI/Q from CK/RN/SE/QN; a combinational full-adder
+  lookalike whose `S` output is unaffected); D/Q-only end to end in
+  LEF-backed and synthetic mode with Stage E1 engaged (every connected iterm
+  is a data pin; clock pins never connected); the Stage D repair pass under
+  an all-sequential tight-fanout config that forces it to run; a connected
+  QN not saving an instance whose Q dangles; a CLOCK-typed iterm on an
+  otherwise valid net failing with the pin and instance named; and the
+  `num_nets` cap policy (too-low cap is a hard `-1` error, the CLI exits
+  nonzero writing no output files, a generous cap still succeeds).
 - `netlistgen_link_smoke.cpp` — library-linkage guard for the same engine,
   no data files needed. A plain `main()` (no GTest) that links the
   `netlistgen` library as an external consumer would
@@ -169,8 +184,9 @@ cd run
 ## Input sources
 
 - Real ODB data (`data/nangate45/` LEF + `data/gcd_nangate45.def`):
-  `HypergraphTest` and `FMOdbTest` fixtures; `netlistgen_stageb_test` and
-  `netlistgen_stagec_test` also use the Nangate45 LEF (no DEF).
+  `HypergraphTest` and `FMOdbTest` fixtures; `netlistgen_stageb_test`,
+  `netlistgen_stagec_test`, and `netlistgen_wellformed_test` also use the
+  Nangate45 LEF (no DEF).
 - Programmatic dbBlocks via `src/engines/netlistgen/` (OpenDB API, no
   LEF/DEF): `netlistgen_test.cpp` and `netlistgen_link_smoke.cpp`.
 - dbBlock-free hypergraphs via `buildFromTopology` /

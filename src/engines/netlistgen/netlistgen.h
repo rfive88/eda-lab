@@ -31,8 +31,11 @@
 // index) or combinational-instance inputs created LATER in the order, so
 // every comb->comb edge goes strictly forward and no combinational cycle can
 // form. Sequential (Q) outputs are unconstrained drivers (the loop-breaker);
-// sequential inputs (D/CK) are unconstrained sinks (feedback through a
-// register is legitimate, not combinational). This requires
+// sequential DATA inputs (D, and scan-in SI where a library has one) are
+// unconstrained sinks (feedback through a register is legitimate, not
+// combinational). Control pins of a sequential cell — clock, async
+// set/reset, scan-enable — are NEVER connected to any net (the D/Q-only
+// convention; see isDataPin below). This requires
 // sequential_ratio > 0 in statistical mode (fail-fast). Stage E1's primary
 // I/O ports (below) do NOT relax this: they run as a separate pass after
 // net formation completes and never participate in its DAG bootstrap. The
@@ -83,6 +86,7 @@ class dbBlock;
 class dbDatabase;
 class dbInst;
 class dbMaster;
+class dbMTerm;
 class dbNet;
 }  // namespace odb
 
@@ -125,8 +129,10 @@ class NetlistBuilder
   // already exists. Triggers lazy synthetic-tech creation on first use. When
   // `clocked` is true, input pin i0 is given dbSigType::CLOCK (its clock pin),
   // so the master reads as sequential via isSequentialMaster — used for the
-  // synthetic sequential representative. Topology is unaffected: a CLOCK input
-  // is still a sink in net formation, exactly as a SIGNAL input was.
+  // synthetic sequential representative. Per the D/Q-only sequential pin
+  // convention (see isDataPin below), the CLOCK pin i0 is NEVER connected to
+  // a net by generation: a synthetic sequential cell's data sink is i1 (its
+  // D pin) and its data driver is o0 (its Q pin).
   odb::dbMaster* makeMaster(const std::string& name,
                             int num_inputs,
                             int num_outputs,
@@ -207,7 +213,11 @@ struct SyntheticNetlistSpec
 
   // Nets are created until this count is reached, or until the free
   // driver/sink pin pools run out, whichever comes first. -1 means "as
-  // many as the pin pools allow".
+  // many as the pin pools allow". In statistical mode the no-dangling-
+  // instance invariant is unconditional: a cap low enough that some
+  // instance cannot be given a connected output is rejected as a hard
+  // generation error (generateSynthetic returns -1), never accepted as
+  // silent truncation.
   int num_nets = -1;
 
   // Fanout = number of load (sink) pins per net, driver EXCLUDED, drawn
@@ -424,6 +434,26 @@ int signalPinCount(odb::dbMaster* master);
 // tag the clock pin USE SIGNAL (e.g. Nangate45). The auto-detection rule for
 // sequential (flip-flop) cells in LEF mode.
 bool isSequentialMaster(odb::dbMaster* master);
+
+// The D/Q-only sequential pin convention: true iff this pin is eligible to
+// participate in data-net connectivity (as a driver if OUTPUT, a sink if
+// INPUT/INOUT). The single source of truth shared by net formation (Stage
+// B/D pools, the Stage D repair pass, Stage E1's PI/PO pools) and by
+// validateNetlist's control-pin check. A pin is a data pin iff:
+//   - its dbSigType is SIGNAL — CLOCK/RESET/SCAN/ANALOG/POWER/GROUND/TIEOFF
+//     pins are never connected, regardless of direction; AND
+//   - if its master is sequential (isSequentialMaster), its name is not a
+//     conventional control-pin name. Needed because Nangate45 tags every pin
+//     USE SIGNAL: clock (CK/CLK/CLOCK/CP), async set/reset (RN/SN/R/S/RESET/
+//     SET/CLR/CLEAR/PRE/PRESET), scan-enable/test (SE/TE/TM), scan-out (SO),
+//     and the inverted output (QN) are excluded by name. Scan-in (SI) is NOT
+//     excluded — it is a data path, muxed behind scan-enable, and is treated
+//     the same as D. Name rules apply to sequential masters only, so
+//     combinational pins that reuse these letters (e.g. a full adder's sum
+//     output S) are unaffected.
+// For the synthetic sequential representative (makeMaster clocked=true) this
+// resolves to: i0 (CLOCK) ineligible, i1 = D eligible, o0 = Q eligible.
+bool isDataPin(odb::dbMTerm* mterm);
 
 // True if the master is a level-sensitive latch: it has a latch gate/enable pin
 // (INPUT named G/GN) but no clock pin, so it is neither a flip-flop nor a plain

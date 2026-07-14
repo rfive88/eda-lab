@@ -200,9 +200,9 @@ struct MasterSpec
 // SyntheticNetlistSpec::io_pin_type_distribution for validation/defaulting.
 struct IoPinTypeDistribution
 {
-  double combinational = 0.70;
-  double buffered = 0.20;
-  double registered = 0.10;
+  double combinational = 1.0;
+  double buffered = 0.0;
+  double registered = 0.0;
 };
 
 struct SyntheticNetlistSpec
@@ -311,7 +311,7 @@ struct SyntheticNetlistSpec
   // populations. Each fraction must be in [0, 1]; the three must sum to
   // 1.0 +/- 0.01 (normalised silently if within tolerance but not exactly
   // 1.0; a sum outside tolerance is a validation error). Defaults to
-  // {0.70, 0.20, 0.10} when unset.
+  // {1.0, 0.0, 0.0} — all combinational, no boundary cells — when unset.
   std::optional<IoPinTypeDistribution> io_pin_type_distribution;
 
   // True when the statistical mix should drive generation.

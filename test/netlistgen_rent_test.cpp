@@ -180,6 +180,13 @@ TEST(RentTest, BasicE1)
   SyntheticNetlistSpec spec = baseSpec();
   spec.rent_k = 2.5;
   spec.rent_p = 0.60;
+  // Explicit mixed distribution: the default is all-combinational (no
+  // boundary cells — see DefaultPinTypeDistributionIsAllCombinational), so
+  // this test's boundary buf/FF plane assertions need a mix that creates
+  // some of each.
+  spec.io_pin_type_distribution =
+      IoPinTypeDistribution{/*combinational=*/0.70, /*buffered=*/0.20,
+                            /*registered=*/0.10};
 
   RentStats stats;
   const int nets = generateSynthetic(nb, spec, nullptr, &stats);
@@ -312,6 +319,31 @@ TEST(RentTest, AllCombinationalPinTypeCreatesNoBoundaryCells)
   const std::vector<bool>& is_reg = hg.vertexBoolPlane("hgm.is_boundary_reg");
   EXPECT_TRUE(std::none_of(is_buf.begin(), is_buf.end(), [](bool v) { return v; }));
   EXPECT_TRUE(std::none_of(is_reg.begin(), is_reg.end(), [](bool v) { return v; }));
+}
+
+// An UNSET io_pin_type_distribution defaults to {combinational: 1.0,
+// buffered: 0.0, registered: 0.0} (the E1 brief's default): every port is
+// a bare bTerm and no boundary buf/FF cell is ever created. Pins the
+// default itself, not just the explicit all-combinational config above.
+TEST(RentTest, DefaultPinTypeDistributionIsAllCombinational)
+{
+  NetlistBuilder nb("defaultDist");
+  SyntheticNetlistSpec spec = baseSpec();
+  spec.rent_k = 2.5;
+  spec.rent_p = 0.60;
+  ASSERT_FALSE(spec.io_pin_type_distribution.has_value());
+
+  RentStats stats;
+  ASSERT_GT(generateSynthetic(nb, spec, nullptr, &stats), 0);
+  ASSERT_TRUE(stats.engaged);
+  EXPECT_GT(stats.n_combinational, 0);
+  EXPECT_EQ(stats.n_combinational, stats.T_actual);
+  EXPECT_EQ(stats.n_buffered, 0);
+  EXPECT_EQ(stats.n_registered, 0);
+  EXPECT_EQ(stats.n_boundary_ff, 0);
+  EXPECT_TRUE(stats.boundary_buf_insts.empty());
+  EXPECT_TRUE(stats.boundary_reg_insts.empty());
+  EXPECT_TRUE(validateNetlist(nb.block()).ok);
 }
 
 // ---------------------------------------------------------------------------

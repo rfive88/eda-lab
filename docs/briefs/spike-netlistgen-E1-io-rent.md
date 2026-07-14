@@ -54,9 +54,9 @@ present.
   "rent_p": 0.60,
   "io_input_ratio": 0.60,
   "io_pin_type_distribution": {
-    "combinational": 0.70,
-    "buffered":       0.20,
-    "registered":     0.10
+    "combinational": 1.0,
+    "buffered":       0.0,
+    "registered":     0.0
   }
 }
 ```
@@ -68,7 +68,7 @@ present.
 | `rent_k` | float | — | Rent coefficient k (required to activate E1) |
 | `rent_p` | float | — | Rent exponent p (required to activate E1) |
 | `io_input_ratio` | float | 0.60 | Fraction of T assigned as PIs; remainder are POs |
-| `io_pin_type_distribution` | object | `{combinational:0.70, buffered:0.20, registered:0.10}` | Fractional split of pin types applied independently to PI and PO populations |
+| `io_pin_type_distribution` | object | `{combinational:1.0, buffered:0.0, registered:0.0}` | Fractional split of pin types applied independently to PI and PO populations |
 
 ### Validation rules
 

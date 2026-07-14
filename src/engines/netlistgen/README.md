@@ -529,7 +529,7 @@ All optional; E1 activates only when **both** `rent_k` and `rent_p` are set.
 | `rent_k` | `spec.rent_k` | Must be `> 0`. |
 | `rent_p` | `spec.rent_p` | `(0, 1.0]` used as given; `(1.0, 1.2]` accepted but **warned + clamped to 1.0** for `T_target` (degenerate but tolerable); `> 1.2` is a hard error. |
 | `io_input_ratio` | `spec.io_input_ratio` | Optional, `(0, 1)`; defaults to `0.60`. |
-| `io_pin_type_distribution` | `spec.io_pin_type_distribution` | Optional object `{"combinational", "buffered", "registered"}`; each fraction in `[0, 1]`, sum `1.0 ± 0.01` (normalised silently if within tolerance but not exact); defaults to `{0.70, 0.20, 0.10}`. |
+| `io_pin_type_distribution` | `spec.io_pin_type_distribution` | Optional object `{"combinational", "buffered", "registered"}`; each fraction in `[0, 1]`, sum `1.0 ± 0.01` (normalised silently if within tolerance but not exact); defaults to `{1.0, 0.0, 0.0}` (all combinational — no boundary cells). |
 
 `rent_k`/`rent_p` set on an otherwise-legacy (weighted-`masters`) spec is a
 validation error, same treatment as `peak_avg_fanout`.
@@ -855,11 +855,12 @@ invalid spec). Consumed downstream by `Hypergraph::buildFromBlock()`.
 | `rent_k` | `std::optional<double>` | unset | Engages Stage E1 (with `rent_p`); Rent coefficient. Must be `> 0`. Requires the statistical mix. |
 | `rent_p` | `std::optional<double>` | unset | Engages Stage E1 (with `rent_k`); Rent exponent. `(0, 1.2]`; `(1.0, 1.2]` warns + clamps to 1.0 for `T_target`. |
 | `io_input_ratio` | `std::optional<double>` | unset (→ `0.60` when engaged) | Fraction of `T` assigned as PIs. Must be in `(0, 1)` if set. Ignored if `rent_k`/`rent_p` unset. |
-| `io_pin_type_distribution` | `std::optional<IoPinTypeDistribution>` | unset (→ `{0.70, 0.20, 0.10}` when engaged) | Pin-type split (combinational/buffered/registered), sum `1.0 ± 0.01`. Ignored if `rent_k`/`rent_p` unset. |
+| `io_pin_type_distribution` | `std::optional<IoPinTypeDistribution>` | unset (→ `{1.0, 0.0, 0.0}` when engaged) | Pin-type split (combinational/buffered/registered), sum `1.0 ± 0.01`. Ignored if `rent_k`/`rent_p` unset. |
 
 `MasterSpec`: `name`, `num_inputs` (2), `num_outputs` (1), `weight` (1.0).
-`IoPinTypeDistribution`: `combinational` (0.70), `buffered` (0.20),
-`registered` (0.10).
+`IoPinTypeDistribution`: `combinational` (1.0), `buffered` (0.0),
+`registered` (0.0) — the all-combinational default creates no boundary
+cells; set an explicit mix to get buffered/registered ports.
 
 The statistical mix is engaged when `tech_lef_path`, `sequential_ratio`,
 `combinational_pin_distribution`, or `target_avg_fanout` is set

@@ -240,10 +240,11 @@ constexpr int kFanoutBucketLo = 10;
 constexpr int kFanoutBucketHi = 50;
 
 // Print a statistics summary of the generated design as the run's final,
-// default-visible output: cell counts (combinational vs sequential), the
-// combinational cells' signal-pin-count distribution, the net count, and the
-// net fanout distribution. Emitted via report() (level OFF, no id/prefix) so it
-// reads as a clean block; nothing here is gated on verbosity.
+// default-visible output: cell counts (combinational vs sequential),
+// top-level pin counts (PI vs PO, by dbBTerm IoType), the combinational
+// cells' signal-pin-count distribution, the net count, and the net fanout
+// distribution. Emitted via report() (level OFF, no id/prefix) so it reads
+// as a clean block; nothing here is gated on verbosity.
 void reportDesignSummary(odb::dbBlock* block, utl::Logger& logger)
 {
   // Cells: split combinational vs sequential, and histogram the combinational
@@ -265,6 +266,21 @@ void reportDesignSummary(odb::dbBlock* block, utl::Logger& logger)
     }
   }
   const int total = seq + comb;
+
+  // Top-level pins: dbBTerms split by direction. Only Stage E1 creates
+  // these today (PI bTerms are always INPUT, PO bTerms OUTPUT), but count
+  // generically by IoType rather than assuming a source, so this stays
+  // correct if a future stage adds ports another way. INOUT counts as PO,
+  // matching netlist_validation.h's "OUTPUT/INOUT is a sink" rule.
+  int num_pi = 0;
+  int num_po = 0;
+  for (odb::dbBTerm* bterm : block->getBTerms()) {
+    if (bterm->getIoType() == odb::dbIoType::INPUT) {
+      ++num_pi;
+    } else {
+      ++num_po;
+    }
+  }
 
   // Nets: fanout is the number of load (sink) pins the net drives — i.e. its
   // pins EXCLUDING the driver. Compute it as total pins minus the OUTPUT
@@ -290,6 +306,8 @@ void reportDesignSummary(odb::dbBlock* block, utl::Logger& logger)
   logger.report("===== Design summary =====");
   logger.report("Cells: {} total  (combinational {}, sequential {})", total,
                 comb, seq);
+  logger.report("Top-level pins: {} total  (PI {}, PO {})", num_pi + num_po,
+                num_pi, num_po);
   logger.report("Combinational cells by signal-pin count:");
   static const char* const kPinLabels[5] = {"2", "3", "4", "5", "6+"};
   for (int i = 0; i < 5; ++i) {

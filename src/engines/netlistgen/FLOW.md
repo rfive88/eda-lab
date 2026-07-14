@@ -660,9 +660,10 @@ stay with `validateSpecConfig` at generation time. `runCliFromFile` is the one
 pipeline: create a shared `utl::Logger` (verbosity from the `-verbosity` flag
 via `applyVerbosity`) → parse → `generateSynthetic` (builder shares the logger)
 → `estimateDieArea` → `validateAndWrite` → `reportDesignSummary` (final
-default-visible statistics block: cell counts comb/seq, combinational
-pin-count histogram, net count, average fanout per net and a fanout histogram —
-fanout meaning load pins, driver excluded, with `10-50`/`>50` bucketed) →
+default-visible statistics block: cell counts comb/seq, top-level pin counts
+PI/PO by `dbBTerm` IoType, combinational pin-count histogram, net count,
+average fanout per net and a fanout histogram — fanout meaning load pins,
+driver excluded, with `10-50`/`>50` bucketed) →
 log done. Each step is an
 `info` phase marker; `-verbosity` surfaces the library's `debugPrint` detail through
 the same logger. `validateAndWrite` gates output on `validateNetlist` (a
@@ -701,7 +702,7 @@ graph TD
   odir -->|create failed| e1c["err 'cannot create output directory'<br/>write nothing; return 1"]
   odir -->|ok| wdef["if output_def_path: writeDef (info: Wrote DEF)"]
   wdef --> wodb["if output_odb_path: writeOdb (info: Wrote .odb)"]
-  wodb --> summ["reportDesignSummary (report):<br/>cells comb/seq · comb pin-count hist<br/>net count · avg fanout/net (driver excl)<br/>fanout hist (loads; 10-50 / &gt;50 bucketed)"]
+  wodb --> summ["reportDesignSummary (report):<br/>cells comb/seq · top-level pins PI/PO (dbBTerm IoType)<br/>comb pin-count hist · net count<br/>avg fanout/net (driver excl)<br/>fanout hist (loads; 10-50 / &gt;50 bucketed)"]
   summ --> summ2["reportPrimaryIoSummary (report):<br/>no-op unless rent_stats.engaged —<br/>target/actual Rent, pin-type counts,<br/>boundary FF count; + per-cluster/<br/>background Rent if clusters engaged"]
   summ2 --> counts["info: Done."]
   counts --> ok0["return 0"]

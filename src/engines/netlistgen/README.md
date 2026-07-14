@@ -659,9 +659,16 @@ returns a `NetlistValidation { bool ok; std::string message; }` naming the
 first offending net or instance. This is a **hard** structural property —
 unlike the statistical `distribution_tolerance_pct` checks, which are
 sampling-noise warnings. The CLI runs this automatically after generation
-and **refuses to write any output if it fails** (fail-fast, reported before
-the final design-summary statistics print); Stage 3 test code or other
-callers can invoke it directly on their own blocks.
+and **always** prints a `===== Well-formedness Check =====` report block
+(`Status: PASS`, or `Status: FAIL` plus the offending message) — before the
+design summary, whether the run passes or fails. On failure it **refuses
+to write any output file** (fail-fast) but still prints the design summary
+/ Primary I/O summary that follow, since the design was fully generated and
+its stats remain useful for diagnosing the violation (an unrelated I/O
+failure — e.g. a bad output directory — on an otherwise-valid netlist does
+*not* print stats, matching the pre-existing behavior for that case). Stage
+3 test code or other callers can invoke `validateNetlist` directly on their
+own blocks.
 
 ## DEF / `.odb` writers (Stage C)
 

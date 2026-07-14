@@ -390,6 +390,27 @@ void reportPrimaryIoSummary(const RentStats& stats, double sequential_ratio,
   logger.report("================================");
 }
 
+// Print the well-formedness check result — the hard structural gate from
+// netlist_validation.h (single driver per net, >=1 load per net, no
+// dangling nets, no dangling instances, no control pins on signal nets) —
+// always, pass or fail, right before the design summary: a failing run
+// still surfaces exactly what's wrong alongside the rest of the run's
+// diagnostics, rather than only as a terse stderr line.
+void reportWellFormedness(const NetlistValidation& v, utl::Logger& logger)
+{
+  logger.report("");
+  logger.report("===== Well-formedness Check =====");
+  if (v.ok) {
+    logger.report("Status: PASS");
+    logger.report("  (single driver per net, >=1 load per net, no dangling "
+                  "nets/instances, no control pins on signal nets)");
+  } else {
+    logger.report("Status: FAIL");
+    logger.report("  {}", v.message);
+  }
+  logger.report("==================================");
+}
+
 }  // namespace
 
 bool validateAndWrite(NetlistBuilder& builder,
@@ -480,7 +501,24 @@ int runCliFromFile(const std::string& config_path,
   builder.estimateDieArea(config.spec.num_insts);
 
   logger.info(utl::UKN, kMsgValidating, "Running well-formedness validation...");
+  // Computed once, up front, so the PASS/FAIL block below and the
+  // write-gating in validateAndWrite agree on the exact same verdict.
+  const NetlistValidation validation = validateNetlist(block);
+  reportWellFormedness(validation, logger);
+
   if (!validateAndWrite(builder, config, err)) {
+    // A structural violation still gets its stats printed (the design was
+    // fully generated; the numbers are useful for diagnosing why) — but an
+    // unrelated I/O failure (bad output dir, write error) with an
+    // otherwise-valid netlist does not, matching the pre-existing
+    // fail-fast-with-no-stats behavior for that case. Either way, no
+    // output file was written (validateAndWrite's own gate) and the
+    // process exits nonzero.
+    if (!validation.ok) {
+      reportDesignSummary(block, logger);
+      reportPrimaryIoSummary(
+          rent_stats, config.spec.sequential_ratio.value_or(0.0), logger);
+    }
     return 1;
   }
   logger.info(utl::UKN, kMsgValidated, "Well-formedness validation passed.");

@@ -659,18 +659,33 @@ JSON is confined to the CLI layer — it never reaches `NetlistBuilder` /
 stay with `validateSpecConfig` at generation time. `runCliFromFile` is the one
 pipeline: create a shared `utl::Logger` (verbosity from the `-verbosity` flag
 via `applyVerbosity`) → parse → `generateSynthetic` (builder shares the logger)
-→ `estimateDieArea` → `validateAndWrite` → `reportDesignSummary` (final
-default-visible statistics block: cell counts comb/seq, top-level pin counts
-PI/PO by `dbBTerm` IoType, combinational pin-count histogram, net count,
-average fanout per net and a fanout histogram — fanout meaning load pins,
-driver excluded, with `10-50`/`>50` bucketed) →
-log done. Each step is an
+→ `estimateDieArea` → `validateNetlist` (computed once,
+up front) → `reportWellFormedness` (always printed, PASS or FAIL — see
+below) → `validateAndWrite` (re-validates internally; its own contract is
+unchanged, still the single gate on whether output is written) →
+`reportDesignSummary` (final default-visible statistics block: cell counts
+comb/seq, top-level pin counts PI/PO by `dbBTerm` IoType, combinational
+pin-count histogram, net count, average fanout per net and a fanout
+histogram — fanout meaning load pins, driver excluded, with `10-50`/`>50`
+bucketed) → `reportPrimaryIoSummary` → log done. Each step is an
 `info` phase marker; `-verbosity` surfaces the library's `debugPrint` detail through
-the same logger. `validateAndWrite` gates output on `validateNetlist` (a
-malformed block writes **nothing**, fail-fast) and then creates each requested
-output path's parent directory (with `create_directories`) if it is missing,
-before writing; only a directory that genuinely cannot be created fails, with
-no partial output. `main()` in `netlistgen_cli.cpp`
+the same logger.
+
+**`reportWellFormedness`** prints a `===== Well-formedness Check =====`
+block naming every rule from `netlist_validation.h` (single driver per
+net, ≥1 load per net, no dangling nets, no dangling instances, no control
+pins on signal nets) and either `Status: PASS` or `Status: FAIL` plus the
+first offending net/instance's message — **always**, regardless of
+outcome, so a failing run still shows exactly what's wrong. `validateAndWrite`
+still gates output on `validateNetlist` (a malformed block writes
+**nothing**, fail-fast) and creates each requested output path's parent
+directory (with `create_directories`) if missing before writing; only a
+directory that genuinely cannot be created fails, with no partial output.
+On a **structural violation** specifically (not an unrelated I/O failure),
+`reportDesignSummary`/`reportPrimaryIoSummary` still print before the
+nonzero return — the design was fully generated, so its stats remain
+useful for diagnosing the failure — but no output file is written either
+way. `main()` in `netlistgen_cli.cpp`
 parses the positional config path and the optional `-verbosity <level>` flag,
 then calls `runCliFromFile` inside a top-level `try/catch` backstop (see
 "Error handling" in `CLAUDE.md`).
@@ -695,12 +710,13 @@ graph TD
   gen --> gok{"nets >= 0?"}
   gok -->|no| e1
   gok -->|yes| die["info: Generation complete (counts)<br/>estimateDieArea(num_insts)"]
-  die --> vaw["info: Running validation<br/>validateAndWrite(builder, config, err)"]
-  vaw --> valid{"validateNetlist ok?<br/>(bTerm-aware since Stage E1)"}
-  valid -->|no| e1b["err 'validation failed'<br/>write nothing; return 1"]
-  valid -->|yes| odir{"ensureOutputDir:<br/>create missing output dirs"}
-  odir -->|create failed| e1c["err 'cannot create output directory'<br/>write nothing; return 1"]
-  odir -->|ok| wdef["if output_def_path: writeDef (info: Wrote DEF)"]
+  die --> vn["info: Running validation<br/>validation = validateNetlist(block)"]
+  vn --> rwf["reportWellFormedness(validation) (report):<br/>always prints — PASS, or FAIL + the<br/>first offending net/instance's message"]
+  rwf --> vaw["validateAndWrite(builder, config, err)<br/>(re-validates internally; same gate as before)"]
+  vaw --> valid{"wrote ok?"}
+  valid -->|no, validation.ok false| e1b["err 'validation failed'; write nothing<br/>STILL print reportDesignSummary +<br/>reportPrimaryIoSummary (stats on a<br/>fully-generated, structurally invalid design)<br/>return 1"]
+  valid -->|no, validation.ok true| e1c["err 'cannot create output dir' /<br/>'failed to write ...' (I/O failure,<br/>not a structural violation);<br/>write nothing, no stats; return 1"]
+  valid -->|yes| wdef["if output_def_path: writeDef (info: Wrote DEF)"]
   wdef --> wodb["if output_odb_path: writeOdb (info: Wrote .odb)"]
   wodb --> summ["reportDesignSummary (report):<br/>cells comb/seq · top-level pins PI/PO (dbBTerm IoType)<br/>comb pin-count hist · net count<br/>avg fanout/net (driver excl)<br/>fanout hist (loads; 10-50 / &gt;50 bucketed)"]
   summ --> summ2["reportPrimaryIoSummary (report):<br/>no-op unless rent_stats.engaged —<br/>target/actual Rent, pin-type counts,<br/>boundary FF count; + per-cluster/<br/>background Rent if clusters engaged"]

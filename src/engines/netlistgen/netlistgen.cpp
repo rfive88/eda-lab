@@ -387,17 +387,21 @@ bool validateSpecConfig(const SyntheticNetlistSpec& spec, utl::Logger* logger)
     }
     return false;
   }
-  // Stage D bootstrap-source requirement: acyclic net formation needs
-  // sequential Q outputs as the only always-valid signal source — no primary
-  // input ports exist until Stage E (which relaxes this to "sequential_ratio
-  // > 0 OR primary_input_count > 0"). An unset ratio counts as 0.
-  if (seq_ratio <= 0.0) {
+  // Bootstrap-source requirement (Stage D, relaxed by Stage E2): the acyclic
+  // net formation needs at least one signal source to seed the design's
+  // input side. Sequential Q outputs are one such source; Stage E1's primary
+  // input ports (generated when both rent_k and rent_p are set) are the other.
+  // So fail fast only when NEITHER is available — sequential_ratio <= 0 AND no
+  // PI ports will be generated. An unset ratio counts as 0. (Exactly one of
+  // rent_k/rent_p set is a separate error caught below; it does not count as a
+  // usable PI-port source here.)
+  const bool has_pi_ports = spec.rent_k.has_value() && spec.rent_p.has_value();
+  if (seq_ratio <= 0.0 && !has_pi_ports) {
     if (logger) {
       logger->warn(utl::UKN, kMsgSeqBootstrap,
-                   "sequential_ratio must be > 0 (got {}): sequential Q "
-                   "outputs are the only bootstrap signal source for the "
-                   "combinational DAG until primary input ports arrive in "
-                   "Stage E",
+                   "sequential_ratio must be > 0 (got {}) unless primary input "
+                   "ports are generated (set rent_k and rent_p): a bootstrap "
+                   "signal source is required for the combinational DAG",
                    seq_ratio);
     }
     return false;
@@ -950,7 +954,17 @@ bool buildPlan(NetlistBuilder& builder, const SyntheticNetlistSpec& spec,
         plan.comb[i].push_back(m);
       }
     }
-    if (plan.seq_ratio > 0.0) {
+    // Materialise the sequential representative when instances will use it
+    // (seq_ratio > 0) OR when Stage E1 may need it for boundary registered
+    // ports even though no internal sequential instances are requested — the
+    // seq_ratio == 0 + rent case newly allowed by the Stage E2 bootstrap
+    // relaxation. (In LEF mode plan.seq is populated from the library
+    // regardless of ratio, so this gap is synthetic-mode only.)
+    const bool needs_seq_for_ports =
+        spec.rent_k.has_value() && spec.rent_p.has_value()
+        && spec.io_pin_type_distribution.has_value()
+        && spec.io_pin_type_distribution->registered > 0.0;
+    if (plan.seq_ratio > 0.0 || needs_seq_for_ports) {
       plan.seq.push_back(builder.makeMaster("SEQ", 2, 1, /*clocked=*/true));
     }
   }
@@ -1415,6 +1429,20 @@ int formNetsAcyclic(NetlistBuilder& builder,
     }
   }
 
+  // Stage E2 bootstrap relaxation: when Stage E1 will generate primary I/O
+  // ports (rent_k and rent_p both set), a dead-output instance that this pass
+  // genuinely cannot repair is NOT fatal — E1's PO pass claims every leftover
+  // never-connected output pin first, turning it into a primary output. This
+  // is the only way a pure-combinational (sequential_ratio == 0) design can
+  // satisfy the guaranteed-connectivity invariant: the last instance in
+  // creation order has no later comb receiver and no sequential D pin to
+  // drive, so Stage D alone cannot connect its output. We defer such
+  // instances here and rely on E1 draining the PO pool completely (see
+  // applyPrimaryIoStageE1). Without rent ports, an unrepairable instance is
+  // still a hard failure.
+  const bool defer_dead_output_to_ports =
+      spec.rent_k.has_value() && spec.rent_p.has_value();
+  int deferred_to_ports = 0;
   int repaired = 0;
   for (int i = n - 1; i >= 0; --i) {
     if (has_connection[i]) {
@@ -1539,6 +1567,13 @@ int formNetsAcyclic(NetlistBuilder& builder,
       }
     }
     if (receiver == nullptr) {
+      if (defer_dead_output_to_ports) {
+        // Leave this instance's output dead; E1's PO pass will claim it (it
+        // lands in E1's po_pool, which E1 drains in full before falling back
+        // to extra sinks). has_connection[i] stays 0 — intentionally.
+        ++deferred_to_ports;
+        continue;
+      }
       // Should not be reachable given the design's total sink-pin supply —
       // kept as a defensive backstop, not a routine outcome.
       if (logger != nullptr) {
@@ -1562,8 +1597,9 @@ int formNetsAcyclic(NetlistBuilder& builder,
     debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,
                "formNetsAcyclic: {} nets ({} below min_fanout at the thin "
                "tail of the order, {} drivers skipped with no eligible "
-               "receiver, {} instances repaired to avoid dangling){}",
-               nets_made, loosened, skipped, repaired,
+               "receiver, {} instances repaired to avoid dangling, {} "
+               "dead outputs deferred to Stage E1 PO ports){}",
+               nets_made, loosened, skipped, repaired, deferred_to_ports,
                peak_enabled
                    ? ", " + std::to_string(cluster_nets_made)
                          + " peak-cluster nets"
@@ -1935,7 +1971,55 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
       }
     }
   }
-  const int actual_T_out = T_out - skipped_po;
+  // ---- Step 4b (Stage E2): drain any dead output formNetsAcyclic deferred ----
+  // The guaranteed-instance-connectivity invariant is completed here. When
+  // sequential_ratio == 0, Stage D's repair pass cannot connect the last
+  // combinational instance's output (no later comb receiver, no sequential D
+  // pin); it defers such instances to this pass (see
+  // defer_dead_output_to_ports). The main PO loop above already claimed
+  // leftover outputs from po_pool, but only T_out of them — so sweep every
+  // instance that STILL has no connected data output and give it a dedicated
+  // primary output. Only genuinely dangling instances are touched: a
+  // multi-output cell that already has one connected output keeps its spare
+  // output danglable (unchanged behaviour). With sequential_ratio > 0 nothing
+  // is ever deferred, so this loop finds nothing and is a no-op — existing
+  // behaviour and determinism are untouched.
+  int repaired_po = 0;
+  for (odb::dbInst* inst : builder.block()->getInsts()) {
+    odb::dbITerm* dead_out = nullptr;
+    bool has_live_out = false;
+    for (odb::dbITerm* it : inst->getITerms()) {
+      if (it->getIoType() != odb::dbIoType::OUTPUT || !is_data_pin(it)) {
+        continue;
+      }
+      if (it->getNet() != nullptr) {
+        has_live_out = true;
+        break;
+      }
+      if (dead_out == nullptr) {
+        dead_out = it;
+      }
+    }
+    if (has_live_out || dead_out == nullptr) {
+      continue;  // has a live data output, or no data output at all
+    }
+    odb::dbNet* net = builder.makeNet("n" + std::to_string(next_net_id++));
+    dead_out->connect(net);
+    const std::string bname = "po" + std::to_string(stats.po_nets.size());
+    odb::dbBTerm* bterm = odb::dbBTerm::create(net, bname.c_str());
+    bterm->setIoType(odb::dbIoType::OUTPUT);
+    stats.po_nets.push_back(net);
+    ++stats.n_combinational;
+    ++repaired_po;
+  }
+  if (logger != nullptr && repaired_po > 0) {
+    debugPrint(logger, utl::UKN, kGroup, kVerbosityDetail,
+               "E1: swept {} deferred dead-output instance(s) into primary "
+               "outputs (sequential_ratio == 0 bootstrap)",
+               repaired_po);
+  }
+
+  const int actual_T_out = (T_out - skipped_po) + repaired_po;
 
   stats.T_in = actual_T_in;
   stats.T_out = actual_T_out;

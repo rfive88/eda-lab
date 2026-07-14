@@ -8,11 +8,13 @@ function `generateSynthetic()`, which fills a builder's block from a
 `SyntheticNetlistSpec` (`netlistgen.h` / `netlistgen.cpp`). Stage C adds output
 and a driver: the DEF / `.odb` writers (`netlist_writers.h/.cpp`), the net
 well-formedness check (`netlist_validation.h/.cpp`), and a standalone
-JSON-driven CLI (`cli_config.h/.cpp`, `netlistgen_cli.cpp`). This reflects the
-code as of Stage E1 plus the well-formedness audit (LEF-backed generation +
-statistical cell mix + max-entropy solve + writers + validation + CLI +
-acyclic net formation + peak fanout sub-clusters + primary I/O generation via
-Rent's rule + the D/Q-only sequential pin constraint).
+JSON-driven CLI (`cli_config.h/.cpp`, `netlistgen_cli.cpp`); Stage E2 adds the
+structural Verilog writer (`verilog_out.h/.cpp`), completing the LEF-backed
+output triplet (`.v` + `.def` + `.odb`). This reflects the code as of Stage E2
+(LEF-backed generation + statistical cell mix + max-entropy solve + DEF/`.odb`/
+Verilog writers + validation + CLI + acyclic net formation + peak fanout
+sub-clusters + primary I/O generation via Rent's rule + the D/Q-only
+sequential pin constraint).
 
 **The D/Q-only sequential pin convention** (the well-formedness audit,
 `docs/briefs/spike-netlistgen-wellformed-audit.md`): only a sequential
@@ -27,13 +29,15 @@ sequential pin convention".
 **Combinational-loop freedom (Stage D).** Statistical-mix net formation is
 **acyclic by construction**: `formNetsAcyclic` reuses the instance creation
 index as a topological order and filters receiver eligibility so every
-comb→comb edge goes strictly forward (see its section below). This requires
-`sequential_ratio > 0` (fail-fast in `validateSpecConfig`) — sequential Q
-outputs bootstrap the combinational DAG; **this is unaffected by Stage E1**
-(below) since primary I/O ports run as a separate pass after formation
-completes, never participating in the DAG bootstrap. The legacy weighted mix
-keeps the original shuffled-pool `formNets` and makes no acyclicity
-guarantee.
+comb→comb edge goes strictly forward (see its section below). This needs a
+bootstrap signal source: either `sequential_ratio > 0` (sequential Q outputs
+seed the DAG) **or**, since **Stage E2**, Rent primary input ports
+(`rent_k`/`rent_p` set) — `validateSpecConfig` fails fast only when neither is
+present. Primary I/O ports still run as a separate pass after formation
+completes; in the `sequential_ratio == 0` case the last combinational
+instance's output is left dead by `formNetsAcyclic` and claimed by Stage E1's
+PO pass (see both sections below). The legacy weighted mix keeps the original
+shuffled-pool `formNets` and makes no acyclicity guarantee.
 
 **Peak fanout sub-clusters** (optional, layered on Stage D — see its own
 section below): `assignPeakClusters` groups a subset of instances into
@@ -207,10 +211,12 @@ graph TD
   fna --> ret
 ```
 
-Note `validateSpecConfig` (run first) also enforces the Stage D
-bootstrap-source rule: a statistical spec with `sequential_ratio <= 0`
-(unset counts as 0) fails fast — sequential Q outputs are the only signal
-source that can start the combinational DAG until Stage E's primary inputs.
+Note `validateSpecConfig` (run first) also enforces the bootstrap-source
+rule (Stage D, relaxed by Stage E2): a statistical spec fails fast only when
+`sequential_ratio <= 0` (unset counts as 0) **and** no Rent PI ports will be
+generated (`rent_k`/`rent_p` unset). Either sequential Q outputs or Stage E1
+primary inputs can seed the combinational DAG; with neither there is no
+signal source at all.
 
 ## `netlistgen.cpp` — statistical generation
 
@@ -378,6 +384,17 @@ well-formedness audit): if a dangling instance is found once the cap is
 already reached, generation fails fast — warn (`UKN-0319`) and return `-1`
 — rather than leaving the instance dangling as "deliberate truncation".
 
+**Stage E2 bootstrap relaxation** (`defer_dead_output_to_ports`, set when
+`rent_k` and `rent_p` are both present): when Stage E1 will generate primary
+I/O ports, an instance this pass genuinely cannot repair (no receiver
+anywhere) is **deferred**, not fatal — `++deferred_to_ports; continue`,
+leaving `has_connection[i]` false. `applyPrimaryIoStageE1`'s PO pass then
+drains every such leftover dead output into a primary output (see its section
+below), which is the only way a pure-combinational `sequential_ratio == 0`
+design satisfies the invariant (its last instance has no later comb receiver
+and no sequential D pin). Without rent ports the unreachable case is still a
+hard `warn + return -1`.
+
 ```mermaid
 graph TD
   setup["build comb_by_owner (owner-sorted)<br/>build net_sink_count + comb_stealable/seq_stealable<br/>(all isDataPin-filtered)"] --> loop{"i = n-1 downto 0"}
@@ -397,7 +414,10 @@ graph TD
   gotseq -->|no| steal["steal fallback:<br/>comb_stealable then seq_stealable,<br/>lazily discarding stale entries,<br/>decrement net_sink_count on success"]
   steal --> gotsteal{"found?"}
   gotsteal -->|yes| mkrep
-  gotsteal -->|no| fail["warn + return -1<br/>(should be unreachable)"]
+  gotsteal -->|no| deferchk{"defer_dead_output_to_ports?<br/>(rent_k & rent_p set)"}
+  deferchk -->|yes| defer["++deferred_to_ports; continue<br/>(E1 PO pass will claim this output)"]
+  deferchk -->|no| fail["warn + return -1<br/>(no bootstrap; unreachable in practice)"]
+  defer --> loop
   mkrep --> loop
 ```
 
@@ -482,7 +502,8 @@ graph TD
   piskip -->|no| pinet["build ONE fresh net: driver =<br/>PI bTerm (combinational) or reused<br/>buf/ff output (buffered/registered);<br/>sinks = popped pins"]
   skippi --> po
   pinet --> po["Step 3 (PO): for each of T_out ports,<br/>pop from po_pool if non-empty (fresh net,<br/>leftover pin as driver) else pick any<br/>existing net (fallback: add as extra sink)"]
-  po --> s6["Step 6: p_actual=log(T_actual)/log(G)<br/>k_actual=T_actual/G^p_actual (always 1.0 — see README)"]
+  po --> drain["Step 4b (E2): sweep every inst still<br/>lacking a connected data output (the ones<br/>formNetsAcyclic deferred) -> fresh net +<br/>OUTPUT bTerm. No-op when seq_ratio>0<br/>(nothing was deferred) -> determinism kept"]
+  drain --> s6["Step 6: p_actual=log(T_actual)/log(G)<br/>k_actual=T_actual/G^p_actual (always 1.0 — see README)<br/>T_out includes the swept repair POs"]
   s6 --> s5{"has_any_cluster(cluster_id)?"}
   s5 -->|no| ret["return stats"]
   s5 -->|yes| clu["Step 5: per-cluster G_c/T_c + avg_fanout_c<br/>(nets with >=1 iterm owned by a cluster-c inst;<br/>broader than T_c's cut-net rule) (skip if degenerate)<br/>+ background G_bg/T_bg + avg_fanout_bg (mirror rule,<br/>cluster_id&lt;0 inst) (skip if degenerate)"]
@@ -650,6 +671,43 @@ graph TD
   dbw --> woret["return stream.good()"]
 ```
 
+## `verilog_out.cpp` — structural Verilog output (Stage E2)
+
+`writeVerilog` completes the LEF-backed output triplet (`.v` + `.def` +
+`.odb`). It walks the same `dbBlock` the DEF / `.odb` writers serialize, so
+`dbInst::getName()` / `dbNet::getName()` are identical across all three by
+construction (the triplet's name-consistency guarantee). LEF-mode gating lives
+in `cli_config` (a synthetic master has no synthesizable cell identity); this
+writer is read-only and never reached in synthetic mode. Structure: split
+`dbBlock::getBTerms()` into inputs/outputs (INPUT vs everything else) → emit
+the module header + port list → `input`/`output` declarations → one `wire` per
+`dbNet` **that has no bTerm** (a port net is already declared as a port and is
+referred to by the port name) → one instance per `dbInst` with a `.mterm(net)`
+connection per connected `dbITerm`. The helper `verilogNetName` returns a net's
+*bTerm* name when it has one (so an instance pin on a PI/PO net stays
+electrically joined to the port, which in Verilog *is* the wire) and its own
+`dbNet` name otherwise — the single deliberate deviation from the brief's
+literal net-naming, safe because Stage E1 gives each net at most one bTerm.
+
+```mermaid
+graph TD
+  wv["writeVerilog(block, path, top_module_name, logger?)"] --> wvnul{"block null?"}
+  wvnul -->|yes| wvf["return false"]
+  wvnul -->|no| wvopen["ofstream(path)"]
+  wvopen --> wvok{"open ok?"}
+  wvok -->|no| wvf
+  wvok -->|yes| split["split getBTerms():<br/>INPUT -> inputs, else -> outputs"]
+  split --> hdr["emit header:<br/>module NAME ( ports... );<br/>input decls, output decls"]
+  hdr --> wires["for net in getNets():<br/>getBTerms().empty()? emit 'wire name;'<br/>(skip port nets)"]
+  wires --> insts["for inst in getInsts():<br/>MASTER name (<br/>&nbsp;&nbsp;.mterm(verilogNetName(net)) per connected iterm<br/>);"]
+  insts --> endm["emit endmodule"]
+  endm --> flush["flush; good = out.good(); close"]
+  flush --> goodq{"good?"}
+  goodq -->|no| wvf
+  goodq -->|yes| dbg["debugPrint trace (if logger)"]
+  dbg --> wvret["return true"]
+```
+
 ## `cli_config.cpp` / `netlistgen_cli.cpp` — the CLI (Stage C)
 
 JSON is confined to the CLI layer — it never reaches `NetlistBuilder` /
@@ -718,7 +776,8 @@ graph TD
   valid -->|no, validation.ok true| e1c["err 'cannot create output dir' /<br/>'failed to write ...' (I/O failure,<br/>not a structural violation);<br/>write nothing, no stats; return 1"]
   valid -->|yes| wdef["if output_def_path: writeDef (info: Wrote DEF)"]
   wdef --> wodb["if output_odb_path: writeOdb (info: Wrote .odb)"]
-  wodb --> summ["reportDesignSummary (report):<br/>cells comb/seq · top-level pins PI/PO (dbBTerm IoType)<br/>comb pin-count hist · net count<br/>avg fanout/net (driver excl)<br/>fanout hist (loads; 10-50 / &gt;50 bucketed)"]
+  wodb --> wv["if output_verilog_path: writeVerilog (info: Wrote Verilog)"]
+  wv --> summ["reportDesignSummary (report):<br/>cells comb/seq · top-level pins PI/PO (dbBTerm IoType)<br/>comb pin-count hist · net count<br/>avg fanout/net (driver excl)<br/>fanout hist (loads; 10-50 / &gt;50 bucketed)"]
   summ --> summ2["reportPrimaryIoSummary (report):<br/>no-op unless rent_stats.engaged —<br/>target/actual Rent, pin-type counts,<br/>boundary FF count; + per-cluster/<br/>background Rent if clusters engaged"]
   summ2 --> counts["info: Done."]
   counts --> ok0["return 0"]

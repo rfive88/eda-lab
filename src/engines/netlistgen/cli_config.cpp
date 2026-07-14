@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -13,6 +14,7 @@
 
 #include "engines/netlistgen/netlist_validation.h"
 #include "engines/netlistgen/netlist_writers.h"
+#include "engines/netlistgen/verilog_out.h"
 #include "odb/db.h"
 #include "support/logging.h"
 #include "utl/Logger.h"
@@ -42,6 +44,33 @@ constexpr int kMsgWroteDef = 326;
 constexpr int kMsgWroteOdb = 327;
 constexpr int kMsgDone = 328;
 constexpr int kMsgCreatedDir = 329;
+constexpr int kMsgWroteVerilog = 330;
+
+// A valid (unescaped) Verilog identifier: a letter or underscore, then any
+// run of letters, digits, underscores, or '$'. Used to validate
+// top_module_name at spec-build time so a malformed name fails cleanly here
+// rather than producing un-parseable Verilog downstream.
+bool isValidVerilogIdentifier(const std::string& s)
+{
+  if (s.empty()) {
+    return false;
+  }
+  const auto headOk = [](char c) {
+    return std::isalpha(static_cast<unsigned char>(c)) || c == '_';
+  };
+  const auto tailOk = [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
+  };
+  if (!headOk(s.front())) {
+    return false;
+  }
+  for (size_t i = 1; i < s.size(); ++i) {
+    if (!tailOk(s[i])) {
+      return false;
+    }
+  }
+  return true;
+}
 
 }  // namespace
 
@@ -185,6 +214,13 @@ bool parseCliConfig(const std::string& json_text,
     if (j.contains("output_odb_path") && !j.at("output_odb_path").is_null()) {
       out.output_odb_path = j.at("output_odb_path").get<std::string>();
     }
+    if (j.contains("output_verilog_path")
+        && !j.at("output_verilog_path").is_null()) {
+      out.output_verilog_path = j.at("output_verilog_path").get<std::string>();
+    }
+    if (j.contains("top_module_name") && !j.at("top_module_name").is_null()) {
+      out.top_module_name = j.at("top_module_name").get<std::string>();
+    }
   } catch (const json::exception& e) {
     // Widened from json::type_error to the whole json::exception hierarchy so a
     // future edit that adds an unchecked .at() (json::out_of_range) or similar
@@ -194,8 +230,28 @@ bool parseCliConfig(const std::string& json_text,
   }
 
   // ---- CLI-level cross-field rule: at least one output path ----
-  if (!out.output_def_path.has_value() && !out.output_odb_path.has_value()) {
-    error = "at least one of 'output_def_path' / 'output_odb_path' must be set";
+  if (!out.output_def_path.has_value() && !out.output_odb_path.has_value()
+      && !out.output_verilog_path.has_value()) {
+    error = "at least one of 'output_def_path' / 'output_odb_path' / "
+            "'output_verilog_path' must be set";
+    return false;
+  }
+
+  // ---- Stage E2: structural Verilog gating (spec-build time) ----
+  // Verilog output is LEF-backed mode only — a synthetic connectivity-only
+  // master has no synthesizable cell identity to emit as a module type.
+  if (out.output_verilog_path.has_value()
+      && !out.spec.tech_lef_path.has_value()) {
+    error = "Verilog output requires LEF-backed mode "
+            "(set 'tech_lef_path' / 'cell_lef_paths')";
+    return false;
+  }
+  // top_module_name goes into the Verilog header verbatim; reject a name that
+  // would not parse as a Verilog identifier. Checked unconditionally (cheap,
+  // and it guards any future Verilog-adjacent use of the field).
+  if (!isValidVerilogIdentifier(out.top_module_name)) {
+    error = "'top_module_name' is not a valid Verilog identifier: '"
+            + out.top_module_name + "'";
     return false;
   }
   return true;
@@ -436,6 +492,10 @@ bool validateAndWrite(NetlistBuilder& builder,
       && !ensureOutputDir(*config.output_odb_path, builder.logger(), err)) {
     return false;
   }
+  if (config.output_verilog_path.has_value()
+      && !ensureOutputDir(*config.output_verilog_path, builder.logger(), err)) {
+    return false;
+  }
   if (config.output_def_path.has_value()) {
     if (!writeDef(builder.block(), *config.output_def_path, builder.logger())) {
       err << "failed to write DEF to " << *config.output_def_path << "\n";
@@ -445,6 +505,14 @@ bool validateAndWrite(NetlistBuilder& builder,
   if (config.output_odb_path.has_value()) {
     if (!writeOdb(builder.db(), *config.output_odb_path)) {
       err << "failed to write .odb to " << *config.output_odb_path << "\n";
+      return false;
+    }
+  }
+  if (config.output_verilog_path.has_value()) {
+    if (!writeVerilog(builder.block(), *config.output_verilog_path,
+                      config.top_module_name, builder.logger())) {
+      err << "failed to write Verilog to " << *config.output_verilog_path
+          << "\n";
       return false;
     }
   }
@@ -533,6 +601,10 @@ int runCliFromFile(const std::string& config_path,
   if (config.output_odb_path.has_value()) {
     logger.info(utl::UKN, kMsgWroteOdb, "Wrote .odb: {}",
                 *config.output_odb_path);
+  }
+  if (config.output_verilog_path.has_value()) {
+    logger.info(utl::UKN, kMsgWroteVerilog, "Wrote Verilog: {}",
+                *config.output_verilog_path);
   }
   reportDesignSummary(block, logger);
   reportPrimaryIoSummary(rent_stats, config.spec.sequential_ratio.value_or(0.0),

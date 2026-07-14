@@ -14,10 +14,10 @@ Stage E2 (structural Verilog output) is deferred and will follow a separate brie
 
 **Before writing a single line of implementation**, read the following in full:
 
-1. All source files under `src/netlistgen/` — understand the complete Stage A–D pipeline,
+1. All source files under `src/engines/netlistgen/` — understand the complete Stage A–D pipeline,
    especially how instances, nets, and cluster assignments are represented, and how the
    final metrics report is printed.
-2. `src/netlistgen/README.md` and `src/netlistgen/FLOW.md` — understand the documented flow.
+2. `src/engines/netlistgen/README.md` and `src/engines/netlistgen/FLOW.md` — understand the documented flow.
 3. `src/common/` — shared utilities (logging, Status, RNG helpers).
 4. The ODB API (search for `dbBTerm`, `dbNet`, `dbBlock`, `dbITerm` in the OpenROAD headers
    or in any existing usage in `src/`) — understand how boundary terminals (PI/PO ports) are

@@ -30,7 +30,12 @@ struct CliConfig
   SyntheticNetlistSpec spec;
   std::optional<std::string> output_def_path;
   std::optional<std::string> output_odb_path;
-  // Stage E: std::optional<std::string> output_verilog_path; primary ports.
+  // Stage E2: structural Verilog output. output_verilog_path requires LEF mode
+  // (a synthetic master has no synthesizable cell identity to emit); enforced
+  // in parseCliConfig. top_module_name names the emitted module and must be a
+  // valid Verilog identifier; defaults to "generated_top".
+  std::optional<std::string> output_verilog_path;
+  std::string top_module_name = "generated_top";
 };
 
 // Parse a JSON config string into `out`. Returns true on success; on failure

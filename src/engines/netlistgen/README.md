@@ -5,7 +5,7 @@ calls — optionally backed by real LEF cells — so tests and benchmarks can
 create netlists of any size with exactly known or statistically controlled
 topology, then feed them to `Hypergraph::buildFromBlock()`.
 
-> **Migration status (Stage E1 of 5+ — "Phase 1" complete since Stage D).**
+> **Migration status (Stage E2 of 5+ — feature-complete through Stage E).**
 > Stage A promoted `netlistgen` from a Stage 1/2 test utility into an engine
 > and made pin access IoType-based. Stage B added LEF-backed masters (real
 > cells) and a statistical cell mix (forward + max-entropy modes). Stage C
@@ -14,19 +14,27 @@ topology, then feed them to `Hypergraph::buildFromBlock()`.
 > statistical-mix net formation **combinational-loop-free by construction**
 > (see "Combinational-loop avoidance" below), completing Phase 1: generated
 > DEF / `.odb` output is genuinely valid — well-formed *and* acyclic. **Stage
-> E1 (this stage, `docs/briefs/spike-netlistgen-E1-io-rent.md`)** adds
-> primary input/output port generation governed by **Rent's rule**
-> (see "Primary I/O generation (Stage E1)" below). The **well-formedness
-> audit** (`docs/briefs/spike-netlistgen-wellformed-audit.md`) then added
-> the D/Q-only sequential pin constraint (see "The D/Q-only sequential pin
+> E1 (`docs/briefs/spike-netlistgen-E1-io-rent.md`)** adds primary
+> input/output port generation governed by **Rent's rule** (see "Primary I/O
+> generation (Stage E1)" below). The **well-formedness audit**
+> (`docs/briefs/spike-netlistgen-wellformed-audit.md`) then added the
+> D/Q-only sequential pin constraint (see "The D/Q-only sequential pin
 > convention" below), hardened `validateNetlist` with a control-pin check,
-> and made a too-low `num_nets` cap a hard error. Still landing later:
-> - **Stage E2** — structural Verilog output (a separate brief).
+> and made a too-low `num_nets` cap a hard error. **Stage E2 (this stage,
+> `docs/briefs/spike-netlistgen-E2-verilog.md`)** adds a structural
+> **Verilog** writer, completing the LEF-backed output triplet
+> (`.v` + `.def` + `.odb`) — see "Structural Verilog writer (Stage E2)"
+> below.
 >
-> Note: Stage E1 does **not** relax the `sequential_ratio > 0` bootstrap
-> requirement noted in earlier revisions of this doc — PI/PO ports are added
-> in a separate pass *after* Stage D's net formation completes and never
-> participate in its DAG bootstrap, so that requirement is unchanged.
+> Note on the bootstrap requirement: Stage D's acyclic net formation needs at
+> least one always-valid signal source to seed the design's input side.
+> Sequential Q outputs are one such source; **Stage E2 relaxes the original
+> `sequential_ratio > 0` rule** to also accept Stage E1's primary input ports
+> as that source, so `sequential_ratio == 0` is now valid *iff* `rent_k` and
+> `rent_p` are set (PI ports will be generated). With neither source it is
+> still a hard error. PI/PO ports themselves are still added in a separate
+> pass *after* Stage D's net formation and never participate in its DAG
+> bootstrap.
 >
 > **Peak fanout sub-clusters** (`docs/briefs/
 > spike-netlistgen-peak-fanout-clusters.md`) landed on top of Stage D:
@@ -683,15 +691,87 @@ own blocks.
 ## DEF / `.odb` writers (Stage C)
 
 `netlist_writers.h` exposes two thin wrappers, callable independently of the
-CLI (Stage E's Verilog writer, pybind11 bindings, or Stage 3 test code can
+CLI (the Stage E2 Verilog writer, pybind11 bindings, or Stage 3 test code can
 call them directly). Available in **both** synthetic and LEF-backed mode:
 
 - `writeDef(block, path, logger = nullptr)` — drives `odb::DefOut` at DEF 5.8.
-  No `PINS` section (no primary ports until Stage E). Returns false on write
-  failure; supplies a throwaway logger when the caller passes none.
+  Once Stage E1 has run, primary ports appear as `dbBTerm`s and DEF's `PINS`
+  section is populated. Returns false on write failure; supplies a throwaway
+  logger when the caller passes none.
 - `writeOdb(db, path)` — wraps `dbDatabase::write` (which takes a
   `std::ostream`, not a filename) in a checked `ofstream`. Returns false if
   the file can't be opened or the stream goes bad.
+
+## Structural Verilog writer (Stage E2)
+
+`verilog_out.h` exposes one function, callable independently of the CLI just
+like the DEF / `.odb` writers:
+
+- `writeVerilog(block, path, top_module_name, logger = nullptr)` — walks the
+  in-memory `dbBlock` and emits syntactically valid **structural** Verilog.
+  Returns false if the file can't be opened or the stream goes bad (same
+  `bool` contract as `writeDef` / `writeOdb`; the CLI reports the failing
+  path). Read-only — never mutates block state.
+
+**LEF-backed mode only.** A synthetic (connectivity-only) master has no
+synthesizable cell identity to emit as a module type, so the CLI fails fast at
+spec-build time when `output_verilog_path` is set without a tech/cell LEF (see
+"JSON config schema" below). The library function itself has no LEF check —
+the gate lives in `cli_config`.
+
+**Output shape** (see `verilog_out.cpp` for the exact formatting):
+
+```verilog
+// Generated by eda-lab netlistgen (structural Verilog, Stage E2).
+module generated_top (
+    pi0, pi1, ..., po0, po1, ...
+);
+    input  pi0;
+    ...
+    output po0;
+    ...
+
+    wire n17;
+    ...
+
+    <CellMasterName> u42 (
+        .A(n17),
+        .ZN(n88)
+    );
+    ...
+endmodule
+```
+
+- **Port list:** every `dbBTerm`, inputs first then outputs, each group in
+  `dbBlock::getBTerms()` iteration order (db/creation order — `pi0..N-1`,
+  `po0..M-1` per Stage E1).
+- **Wires:** one per `dbNet`, **except** nets that carry a `dbBTerm` — a
+  top-level port net is already declared as `input`/`output` and is referred
+  to by the port name, so a second `wire` for it would redeclare the
+  identifier. Detected via `dbNet::getBTerms()` being non-empty.
+- **Instances:** iterate `dbBlock::getInsts()`; cell type = master name,
+  instance name = `dbInst::getName()`, one `.mterm(net)` per connected
+  `dbITerm` (unconnected pins skipped). Boundary buffer/FF cells inserted by
+  Stage E1 are ordinary instances here — no special casing.
+- **Port-net naming (one deliberate deviation from a literal brief reading):**
+  an instance pin on a port net is emitted with the *port* (bTerm) name, not
+  the internal `dbNet` name, because in Verilog a top-level port *is* the
+  wire — using the raw net name would leave `pi0` and the pins it feeds
+  electrically disconnected. Stage E1 gives each net at most one bTerm, so
+  this is unambiguous, and it only ever affects port nets (which emit no
+  `wire` line anyway); every `wire` actually emitted keeps the exact
+  name-consistency guarantee below.
+
+**Name-consistency guarantee.** Because `.v`, `.def`, and `.odb` are all
+serialized from the *same* in-memory `dbBlock`, `dbInst::getName()` and
+`dbNet::getName()` are identical across all three by construction. This is the
+whole point of the triplet: a generated design can be handed to external EDA
+tools (OpenROAD, Yosys, ...) as **Verilog + DEF + LEF**, and the instance/net
+names line up across formats for cross-tool validation. Instance names are
+identical across `.v` and `.def`; the emitted `wire` names are exactly the
+non-port `dbNet` names (`.def` additionally lists the port nets, which the
+`.v` declares as ports instead). `test/netlistgen_verilog_test.cpp` verifies
+this directly.
 
 ## Standalone CLI (`netlistgen_cli`, Stage C)
 
@@ -731,7 +811,7 @@ never into the `netlistgen` library). The schema is a serialization of
 | `fanout_range` `{min,max}` | `spec.min_fanout` / `max_fanout` | Optional. Load pins per net (fanout), driver excluded. |
 | `tech_lef_path` | `spec.tech_lef_path` | Optional; engages LEF mode. |
 | `cell_lef_paths` | `spec.cell_lef_paths` | Optional array. |
-| `sequential_ratio` | `spec.sequential_ratio` | **Required > 0** since Stage D (bootstrap-source rule; enforced at generation time). |
+| `sequential_ratio` | `spec.sequential_ratio` | Bootstrap-source rule (enforced at generation time): **> 0**, OR `== 0` when `rent_k`/`rent_p` are set so Stage E1 generates PI ports (Stage E2 relaxation). Not both absent. |
 | `combinational_pin_distribution` | `spec.combinational_pin_distribution` | Object keyed `"2","3","4","5","6+"`, sum 100. Mode A. |
 | `target_avg_fanout` | `spec.target_avg_fanout` | Mode B (mutually exclusive with the distribution). |
 | `distribution_tolerance_pct` | `spec.distribution_tolerance_pct` | Optional (default 2.0). |
@@ -744,10 +824,15 @@ never into the `netlistgen` library). The schema is a serialization of
 | `io_pin_type_distribution` | `spec.io_pin_type_distribution` | Optional object `{"combinational","buffered","registered"}`, sum `1.0 ± 0.01`. Ignored if `rent_k`/`rent_p` absent. |
 | `output_def_path` | CLI-only | Write DEF here if set. |
 | `output_odb_path` | CLI-only | Write `.odb` here if set. |
+| `output_verilog_path` | CLI-only | Write structural Verilog here if set. **Requires LEF mode** (`tech_lef_path`/`cell_lef_paths`); fail-fast otherwise. |
+| `top_module_name` | CLI-only | Module name in the `.v` header; defaults to `"generated_top"`. Must be a valid Verilog identifier (fail-fast otherwise). |
 
-**Output-path independence:** `output_def_path` and `output_odb_path` are each
-independently optional — whichever are set are written, the rest skipped — but
-**at least one must be set** (fail-fast otherwise). No cell is ever named in
+**Output-path independence:** `output_def_path`, `output_odb_path`, and
+`output_verilog_path` are each independently optional — whichever are set are
+written, the rest skipped — but **at least one must be set** (fail-fast
+otherwise). All three are gated behind well-formedness: `validateAndWrite`
+runs `validateNetlist` first and writes *nothing* (DEF, `.odb`, or `.v`) if it
+fails. No cell is ever named in
 config: the mix is fully determined by `sequential_ratio` plus exactly one of
 `combinational_pin_distribution` or `target_avg_fanout`. With no LEF fields,
 generation is synthetic-only and the DEF's `DIEAREA` is auto-sized via the
@@ -797,6 +882,30 @@ Mode B example (target average fanout, synthetic-only, DEF-only):
   "fanout_range": { "min": 2, "max": 6 },
   "target_avg_fanout": 3.4,
   "output_def_path": "run/generated.def"
+}
+```
+
+Full triplet example (LEF-backed, Rent I/O ports, all three outputs — the
+Stage E2 use case: hand `.v` + `.def` + `.odb` to external EDA tools with
+matching instance/net names):
+
+```json
+{
+  "seed": 42,
+  "instance_count": 5000,
+  "net_count": null,
+  "fanout_range": { "min": 2, "max": 6 },
+  "tech_lef_path": "data/nangate45/Nangate45_tech.lef",
+  "cell_lef_paths": ["data/nangate45/Nangate45_stdcell.lef"],
+  "sequential_ratio": 0.15,
+  "target_avg_fanout": 4.0,
+  "rent_k": 2.5,
+  "rent_p": 0.60,
+  "io_input_ratio": 0.60,
+  "top_module_name": "generated_top",
+  "output_def_path": "run/generated.def",
+  "output_odb_path": "run/generated.odb",
+  "output_verilog_path": "run/generated.v"
 }
 ```
 
@@ -1026,19 +1135,37 @@ ctest --test-dir build -R "netlistgen" --output-on-failure
   instance); and the `num_nets` cap policy (too-low cap → `-1` from
   `generateSynthetic`; the in-process CLI exits nonzero and writes no
   output file; a generous cap still succeeds).
+- `test/netlistgen_verilog_test.cpp` — Stage E2 structural Verilog writer
+  (needs `EDA_LAB_DATA_DIR` and the built `netlistgen_cli` binary): the LEF-mode
+  gate (`output_verilog_path` without a tech LEF fails at spec-build time;
+  Verilog-only output is a valid output set), `top_module_name` validation
+  (custom valid name honored; `"0bad"` rejected), the basic output shape
+  (exactly one `module`/`endmodule`, balanced parens, no stray content after
+  `endmodule`, every E1 PI/PO name declared as a port, emitted instance count
+  == `instance_count` under the default all-combinational pin type), the
+  name-consistency guarantee (`.v` vs `.def` instance sets identical; every
+  emitted `wire` is a `.def` net and the `.def`-only nets are exactly the port
+  nets), master names all being real loaded LEF cells, the
+  `sequential_ratio == 0` + Rent bootstrap relaxation (valid with `rent_k`/
+  `rent_p`, still an error without), and a CLI smoke test spawning
+  `netlistgen_cli` for all three outputs at once (all files present, DEF
+  round-trips instance/net counts, `.v` names agree with the DEF).
 - `test/netlistgen_link_smoke.cpp` — library-linkage guard.
 
 Scale reference: ~500k insts / ~1.4M pins generate in about 2 s (synthetic).
 
 ## Open questions / follow-on
 
-- **Stage E2 (not yet implemented)** — structural Verilog output
-  (`output_verilog_path`), a separate brief. Note this repo's Stage E1 does
-  **not** relax `sequential_ratio > 0` the way an earlier revision of this
-  doc predicted ("... OR `primary_input_count > 0`") — PI/PO generation
-  turned out to run as a pass *after* Stage D's DAG formation rather than
-  participating in its bootstrap, so that requirement stands unchanged;
-  Stage E2 (or a future revision of this note) should reassess.
+- **Stage E2 (done)** — structural Verilog output (`output_verilog_path`);
+  see "Structural Verilog writer (Stage E2)" above. This is the final Stage E
+  milestone: the netlistgen engine is now feature-complete through Stage E.
+  Stage E2 also settled the bootstrap question an earlier revision of this
+  doc raised: `sequential_ratio == 0` is now accepted when Rent PI ports are
+  generated (`rent_k`/`rent_p` set) — those ports are the alternate bootstrap
+  source — while PI/PO generation still runs as a pass *after* Stage D's DAG
+  formation. Remaining Verilog non-goals: behavioral/functional Verilog,
+  synthetic (no-LEF) Verilog, and the `edalab run netlistgen` typer CLI
+  binding.
 - Custom prior distribution for Mode B's max-entropy tilt (currently uniform).
 - YAML config support alongside JSON.
 - Peak fanout sub-clusters: no LEF-mode-specific test coverage yet (the

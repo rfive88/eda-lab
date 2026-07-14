@@ -1,7 +1,7 @@
 # Spike Brief — Stage A of 5: Foundation
 ## (directory move, library target structure, IoType refactor, regression gate)
 
-**Target directory:** `src/netlistgen/` → `src/engines/netlistgen/`
+**Target directory:** `src/engines/netlistgen/` → `src/engines/netlistgen/`
 **Prerequisites:** none — this is the first stage.
 **Blocks:** Stage B (LEF-backed generation + statistical cell mix)
 **Do not proceed past this stage's acceptance gate (Section 4) in the same session.**

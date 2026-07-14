@@ -11,10 +11,10 @@ providing ground truth for validating the hg_metrics congestion and timing detec
 
 **Before writing a single line of implementation**, read the following in full:
 
-1. All source files under `src/netlistgen/` — understand the current Stage A–D pipeline,
+1. All source files under `src/engines/netlistgen/` — understand the current Stage A–D pipeline,
    especially how instances are generated (Stage A), how nets and fanout are generated (Stage B),
    and how the JSON config is parsed.
-2. `src/netlistgen/README.md` and `src/netlistgen/FLOW.md` — understand the documented flow.
+2. `src/engines/netlistgen/README.md` and `src/engines/netlistgen/FLOW.md` — understand the documented flow.
 3. `src/common/` — understand shared utilities that may be relevant.
 
 Identify:
@@ -146,8 +146,8 @@ All tests must pass under `ctest` before committing.
 - [ ] Stages C and D untouched
 - [ ] All existing netlistgen tests green (no regression)
 - [ ] New test cases green
-- [ ] `src/netlistgen/FLOW.md` updated to show cluster assignment step in the pipeline diagram
-- [ ] `src/netlistgen/README.md` updated to document the new JSON fields
+- [ ] `src/engines/netlistgen/FLOW.md` updated to show cluster assignment step in the pipeline diagram
+- [ ] `src/engines/netlistgen/README.md` updated to document the new JSON fields
 - [ ] Committed with message `netlistgen: peak fanout sub-cluster generation`
 
 ## Hard gate

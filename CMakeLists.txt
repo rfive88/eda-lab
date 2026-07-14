@@ -25,7 +25,8 @@ add_library(ord_shim src/support/ord_shim.cpp)
 add_library(netlistgen
   src/engines/netlistgen/netlistgen.cpp
   src/engines/netlistgen/netlist_writers.cpp
-  src/engines/netlistgen/netlist_validation.cpp)
+  src/engines/netlistgen/netlist_validation.cpp
+  src/engines/netlistgen/verilog_out.cpp)
 target_include_directories(netlistgen PUBLIC src)
 target_link_libraries(netlistgen PUBLIC odb utl ord_shim)
 
@@ -137,6 +138,21 @@ target_link_libraries(netlistgen_wellformed_test PRIVATE netlistgen_cli_core
                                                          GTest::gtest
                                                          GTest::gtest_main)
 
+# Stage E2 structural Verilog writer: writeVerilog output shape, LEF-mode
+# gating + top_module_name validation, name-consistency across .v/.def/.odb,
+# the sequential_ratio==0 + rent bootstrap relaxation, and a CLI smoke test
+# writing all three outputs. Links netlistgen_cli_core for parseCliConfig /
+# validateAndWrite, and spawns netlistgen_cli for the smoke test.
+add_executable(netlistgen_verilog_test test/netlistgen_verilog_test.cpp)
+target_compile_definitions(netlistgen_verilog_test
+                           PRIVATE EDA_LAB_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+                                   NETLISTGEN_CLI_BIN="$<TARGET_FILE:netlistgen_cli>")
+target_link_libraries(netlistgen_verilog_test PRIVATE netlistgen_cli_core
+                                                      netlistgen odb utl
+                                                      GTest::gtest
+                                                      GTest::gtest_main)
+add_dependencies(netlistgen_verilog_test netlistgen_cli)
+
 add_executable(fm_partitioner_test test/fm_partitioner_test.cpp)
 target_compile_definitions(fm_partitioner_test
                            PRIVATE EDA_LAB_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
@@ -179,6 +195,7 @@ add_test(NAME netlistgen_staged_test COMMAND netlistgen_staged_test)
 add_test(NAME netlistgen_peak_cluster_test COMMAND netlistgen_peak_cluster_test)
 add_test(NAME netlistgen_rent_test COMMAND netlistgen_rent_test)
 add_test(NAME netlistgen_wellformed_test COMMAND netlistgen_wellformed_test)
+add_test(NAME netlistgen_verilog_test COMMAND netlistgen_verilog_test)
 add_test(NAME fm_partitioner_test COMMAND fm_partitioner_test)
 add_test(NAME cli_help_test COMMAND cli_help_test)
 add_test(NAME error_handling_test COMMAND error_handling_test)

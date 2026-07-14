@@ -17,7 +17,7 @@ structure, CMake plumbing, README, and FLOW.md that subsequent briefs (C2–C4, 
   by hg_metrics functions.
 - `src/hg_metrics/timing_metrics.h/.cpp` should be created as stubs (header guard + TODO) so the
   build is complete from day one.
-- Do not read or modify anything under `src/hypergraph/` or `src/netlistgen/`.
+- Do not read or modify anything under `src/hypergraph/` or `src/engines/netlistgen/`.
 
 ## Files to Create
 

@@ -23,10 +23,10 @@ this brief covers everything remaining:
 
 **Before writing a single line of implementation**, read the following in full:
 
-1. All source files under `src/netlistgen/` — understand the complete A→E1 pipeline,
+1. All source files under `src/engines/netlistgen/` — understand the complete A→E1 pipeline,
    especially how the DEF and ODB writers walk `dbInst`/`dbITerm`/`dbNet`/`dbBTerm`.
    The Verilog writer follows the same traversal pattern.
-2. `src/netlistgen/FLOW.md` and `README.md`.
+2. `src/engines/netlistgen/FLOW.md` and `README.md`.
 3. The ODB API for `dbMTerm` — you need real master pin names for Verilog port connections.
    Confirm these are already resolved via Stage A's LEF-backed path (cell masters loaded).
 4. `docs/briefs/spike-brief-netlistgen-stageE-ports-verilog.md` — the original Stage E
@@ -44,6 +44,16 @@ Only after completing this read should any implementation begin.
   cell identity — there is nothing to emit as a module type. Fail fast at spec-build time
   if `output_verilog_path` is set without `tech_lef_path`/`cell_lef_paths`.
 - The writer must not modify `dbBlock` state — read only.
+- The Verilog writer is called only after `validateNetlist` passes. If validation
+  fails, generation aborts before any output files are written — including `.v`.
+  This ordering was established in Stage E1 and the wellformed-audit brief; do not
+  move the `writeVerilog` call to before the validation gate.
+- **During source read, also verify that DEF and ODB output are equally gated** —
+  `validateNetlist` must run before `writeDef`, `writeOdb`, and `writeVerilog` are
+  called. If DEF/ODB are currently written before validation runs, fix the ordering
+  so all three outputs are blocked until the netlist is confirmed well-formed. Add a
+  test that confirms no output files are written (DEF, ODB, or Verilog) when
+  `validateNetlist` returns a failure.
 - All new JSON fields are optional. If `output_verilog_path` is absent, no `.v` is
   written; all prior behaviour is unchanged.
 
@@ -89,7 +99,7 @@ must be accepted. Add a test for this case (see Section 5).
 
 ### New files
 
-- `src/netlistgen/VerilogOut.h` — declares a single function:
+- `src/engines/netlistgen/VerilogOut.h` — declares a single function:
   ```cpp
   namespace netlistgen {
   // Writes a structural Verilog netlist for the given block.
@@ -101,7 +111,7 @@ must be accepted. Add a test for this case (see Section 5).
   }
   ```
 
-- `src/netlistgen/VerilogOut.cpp` — implementation. Do not expose any other symbols.
+- `src/engines/netlistgen/VerilogOut.cpp` — implementation. Do not expose any other symbols.
 
 ### Output format
 
@@ -136,7 +146,9 @@ endmodule
   order (or alphabetical — follow whatever order `dbBlock::getBTerms()` returns; document
   the choice in a comment).
 - `wire` declarations: one per `dbNet`. Do not emit wires for nets that are directly a
-  `dbBTerm` (top-level ports are already declared as input/output).
+  `dbBTerm` (top-level ports are already declared as input/output). Check via
+  `dbNet::getBTerms().empty()` — if false, the net is a port net; skip the `wire`
+  declaration for it.
 - Instance instantiation: iterate `dbBlock::getInsts()`. For each instance:
   - Cell type = `dbInst::getMaster()::getName()`
   - Instance name = `dbInst::getName()`
@@ -180,7 +192,7 @@ construction. **State this explicitly in the README** and add a test verifying i
 ## Files to modify
 
 Based on your source read, identify the minimal set. Expected:
-- New `src/netlistgen/VerilogOut.h` and `VerilogOut.cpp`
+- New `src/engines/netlistgen/VerilogOut.h` and `VerilogOut.cpp`
 - JSON config struct and parser (two new fields + LEF-mode gating validation)
 - Main pipeline file — call `writeVerilog` after DEF/ODB writers when path is set
 - Stage D spec-build validation (bootstrap relaxation — only if E1 didn't already handle it)
@@ -196,11 +208,14 @@ Add to the existing netlistgen test suite:
 2. **LEF-mode gating** — `output_verilog_path` set without `tech_lef_path` → non-OK
    Status at spec-build time, no files written.
 
-3. **Basic Verilog output** — LEF-backed config with `output_verilog_path`:
+3. **Basic Verilog output** — LEF-backed config with `output_verilog_path`, default
+   all-combinational `io_pin_type_distribution`:
    - File is created and non-empty.
    - Contains exactly one `module` and one `endmodule`.
-   - Instance count in `.v` matches `instance_count` from config
-     (count `<MasterName> <instname>` lines).
+   - Instance count in `.v` equals `instance_count` from config (no boundary buffer/FF
+     cells with all-combinational pin type distribution). If `io_pin_type_distribution`
+     has non-zero `buffered` or `registered`, instance count will be higher than
+     `instance_count` by the number of boundary cells inserted by E1.
    - Every PI/PO name from E1 appears in the port list.
    - No syntax errors detectable by lightweight checks (balanced parens, no stray semicolons
      after `endmodule`, etc.).

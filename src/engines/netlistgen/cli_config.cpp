@@ -384,8 +384,10 @@ void reportPrimaryIoSummary(const RentStats& stats, double sequential_ratio,
           cr.cluster_idx, cr.G_c, cr.T_c, cr.k_c, cr.p_c, cr.avg_fanout_c);
     }
     if (stats.background_valid) {
-      logger.report("Background:  G={}  T_bg={}  k={:.3f}  p={:.3f}",
-                    stats.G_bg, stats.T_bg, stats.k_bg, stats.p_bg);
+      logger.report(
+          "Background:  G={}  T_bg={}  k={:.3f}  p={:.3f}  avg_fanout={:.2f}",
+          stats.G_bg, stats.T_bg, stats.k_bg, stats.p_bg,
+          stats.avg_fanout_bg);
     }
   }
   logger.report("================================");

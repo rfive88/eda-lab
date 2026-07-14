@@ -2050,11 +2050,20 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
       }
     }
     int T_bg = 0;
+    // avg_fanout_bg mirrors avg_fanout_c: every net with >= 1 iterm owned
+    // by a background instance (has_bg alone), broader than T_bg's
+    // boundary-crossing rule below.
+    long fanout_sum_bg = 0;
+    int nets_in_bg = 0;
     for (odb::dbNet* net : builder.block()->getNets()) {
       bool touches_boundary = false;
       const std::vector<int> clusters = touchedClusters(net, &touches_boundary);
       const bool has_bg = std::any_of(clusters.begin(), clusters.end(),
                                       [](int x) { return x < 0; });
+      if (has_bg) {
+        fanout_sum_bg += netFanout(net);
+        ++nets_in_bg;
+      }
       const bool has_non_bg_cluster =
           std::any_of(clusters.begin(), clusters.end(),
                      [](int x) { return x >= 0; });
@@ -2062,6 +2071,8 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
         ++T_bg;
       }
     }
+    stats.avg_fanout_bg =
+        nets_in_bg > 0 ? static_cast<double>(fanout_sum_bg) / nets_in_bg : 0.0;
     stats.G_bg = G_bg;
     stats.T_bg = T_bg;
     if (G_bg < 2 || T_bg < 1) {

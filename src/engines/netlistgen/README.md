@@ -428,7 +428,10 @@ set (exactly one alone is a validation error).
   cluster-`c` instance — a broader membership rule than `T_c`'s cut nets,
   which additionally require an endpoint *outside* the cluster (a net
   wired entirely within the cluster counts toward `avg_fanout_c` but not
-  `T_c`). Not computed for the background (only per-cluster).
+  `T_c`). Background gets the mirror-image `avg_fanout_bg`: any net with
+  >= 1 iterm owned by a `cluster_id < 0` instance (same "background"
+  definition `T_bg` already uses, which also reads a boundary buf/FF
+  instance as background — it has no `cluster_id` entry at all).
 - **Step 6 — actual Rent for the full design**: `p_actual = log(T_actual) /
   log(G)`, `k_actual = T_actual / G^p_actual`. Note this formula (the
   brief's own, and reused identically for `p_c`/`k_c` and `p_bg`/`k_bg`) is

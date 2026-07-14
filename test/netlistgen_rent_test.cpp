@@ -426,6 +426,7 @@ TEST(RentTest, WithSubClusters)
   EXPECT_GT(stats.G_bg, 0);
   EXPECT_GT(stats.T_bg, 0);
   EXPECT_TRUE(std::isfinite(stats.p_bg));
+  EXPECT_GT(stats.avg_fanout_bg, 0.0);
 
   // Soft check only (brief: "warn if not") — peak clusters are more
   // densely/intensely wired, so their p tends to run higher than the
@@ -491,6 +492,53 @@ TEST(RentTest, ClusterAvgFanoutMatchesIndependentRecomputation)
         static_cast<double>(fanout_sum) / net_count;
     EXPECT_NEAR(cr.avg_fanout_c, expected, 1e-9) << "cluster " << cr.cluster_idx;
   }
+}
+
+// avg_fanout_bg independently recomputed the same way: a net counts if AT
+// LEAST ONE of its connected iterms is owned by a background
+// (cluster_id < 0, which also covers boundary buf/FF instances — same
+// convention T_bg already uses) instance.
+TEST(RentTest, BackgroundAvgFanoutMatchesIndependentRecomputation)
+{
+  NetlistBuilder nb("bgFanout");
+  SyntheticNetlistSpec spec = baseSpec();
+  spec.rent_k = 2.5;
+  spec.rent_p = 0.60;
+  spec.peak_avg_fanout = 12.0;
+  spec.peak_cluster_pct = 0.15;
+  spec.num_peak_clusters = 2;
+
+  std::vector<int> cluster_id;
+  RentStats stats;
+  ASSERT_GT(generateSynthetic(nb, spec, &cluster_id, &stats), 0);
+  ASSERT_TRUE(stats.background_valid);
+
+  auto instClusterOf = [&](odb::dbInst* inst) -> int {
+    const int idx = std::atoi(inst->getName().c_str() + 1);
+    return idx < static_cast<int>(cluster_id.size()) ? cluster_id[idx] : -1;
+  };
+
+  long fanout_sum = 0;
+  int net_count = 0;
+  for (odb::dbNet* net : nb.block()->getNets()) {
+    bool in_background = false;
+    int sinks = 0;
+    for (odb::dbITerm* it : net->getITerms()) {
+      if (instClusterOf(it->getInst()) < 0) {
+        in_background = true;
+      }
+      if (it->getIoType() != odb::dbIoType::OUTPUT) {
+        ++sinks;
+      }
+    }
+    if (in_background) {
+      fanout_sum += sinks;
+      ++net_count;
+    }
+  }
+  ASSERT_GT(net_count, 0);
+  const double expected = static_cast<double>(fanout_sum) / net_count;
+  EXPECT_NEAR(stats.avg_fanout_bg, expected, 1e-9);
 }
 
 // ---------------------------------------------------------------------------

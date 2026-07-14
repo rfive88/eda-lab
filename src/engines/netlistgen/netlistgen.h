@@ -410,6 +410,12 @@ struct RentStats
   int T_bg = 0;
   double p_bg = 0.0;
   double k_bg = 0.0;
+  // Average fanout (load dbITerms, driver excluded) over every net with AT
+  // LEAST ONE connected iterm owned by a background (cluster_id < 0)
+  // instance — mirrors ClusterRentStats::avg_fanout_c's membership rule,
+  // broader than T_bg's boundary-crossing one. Set whenever has_clusters is
+  // true, independent of background_valid (0.0 if no such net exists).
+  double avg_fanout_bg = 0.0;
 };
 
 // Populate builder's block from the spec. Instances are named u0..u{n-1}

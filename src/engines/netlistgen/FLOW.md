@@ -485,7 +485,7 @@ graph TD
   po --> s6["Step 6: p_actual=log(T_actual)/log(G)<br/>k_actual=T_actual/G^p_actual (always 1.0 — see README)"]
   s6 --> s5{"has_any_cluster(cluster_id)?"}
   s5 -->|no| ret["return stats"]
-  s5 -->|yes| clu["Step 5: per-cluster G_c/T_c (skip if degenerate)<br/>+ background G_bg/T_bg (skip if degenerate)"]
+  s5 -->|yes| clu["Step 5: per-cluster G_c/T_c + avg_fanout_c<br/>(nets with >=1 iterm owned by a cluster-c inst;<br/>broader than T_c's cut-net rule) (skip if degenerate)<br/>+ background G_bg/T_bg (skip if degenerate)"]
   clu --> ret
 ```
 

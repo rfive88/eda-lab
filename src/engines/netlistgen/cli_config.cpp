@@ -379,8 +379,9 @@ void reportPrimaryIoSummary(const RentStats& stats, double sequential_ratio,
     logger.report("");
     logger.report("===== Sub-cluster Rent Parameters =====");
     for (const ClusterRentStats& cr : stats.cluster_rent) {
-      logger.report("Cluster {}:  G={}  T_c={}  k={:.3f}  p={:.3f}",
-                    cr.cluster_idx, cr.G_c, cr.T_c, cr.k_c, cr.p_c);
+      logger.report(
+          "Cluster {}:  G={}  T_c={}  k={:.3f}  p={:.3f}  avg_fanout={:.2f}",
+          cr.cluster_idx, cr.G_c, cr.T_c, cr.k_c, cr.p_c, cr.avg_fanout_c);
     }
     if (stats.background_valid) {
       logger.report("Background:  G={}  T_bg={}  k={:.3f}  p={:.3f}",

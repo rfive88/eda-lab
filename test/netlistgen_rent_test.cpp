@@ -420,6 +420,7 @@ TEST(RentTest, WithSubClusters)
     EXPECT_GT(cr.G_c, 0);
     EXPECT_GT(cr.T_c, 0);
     EXPECT_TRUE(std::isfinite(cr.p_c));
+    EXPECT_GT(cr.avg_fanout_c, 0.0);
   }
   ASSERT_TRUE(stats.background_valid);
   EXPECT_GT(stats.G_bg, 0);
@@ -436,6 +437,59 @@ TEST(RentTest, WithSubClusters)
                 << cr.p_c << " did not exceed background p_bg=" << stats.p_bg
                 << " (not a failure)\n";
     }
+  }
+}
+
+// avg_fanout_c independently recomputed from raw block data, per the exact
+// membership rule: a net counts toward cluster c's average if AT LEAST ONE
+// of its connected iterms is owned by an instance with cluster_id == c
+// (broader than T_c's cut-net rule — no requirement the net also reach
+// outside the cluster). Fanout itself is load iterms, driver excluded,
+// matching reportDesignSummary's convention (bTerms not counted).
+TEST(RentTest, ClusterAvgFanoutMatchesIndependentRecomputation)
+{
+  NetlistBuilder nb("clusterFanout");
+  SyntheticNetlistSpec spec = baseSpec();
+  spec.rent_k = 2.5;
+  spec.rent_p = 0.60;
+  spec.peak_avg_fanout = 12.0;
+  spec.peak_cluster_pct = 0.15;
+  spec.num_peak_clusters = 2;
+
+  std::vector<int> cluster_id;
+  RentStats stats;
+  ASSERT_GT(generateSynthetic(nb, spec, &cluster_id, &stats), 0);
+  ASSERT_TRUE(stats.has_clusters);
+  ASSERT_FALSE(stats.cluster_rent.empty());
+
+  auto instClusterOf = [&](odb::dbInst* inst) -> int {
+    const int idx = std::atoi(inst->getName().c_str() + 1);
+    return idx < static_cast<int>(cluster_id.size()) ? cluster_id[idx] : -1;
+  };
+
+  for (const ClusterRentStats& cr : stats.cluster_rent) {
+    long fanout_sum = 0;
+    int net_count = 0;
+    for (odb::dbNet* net : nb.block()->getNets()) {
+      bool in_cluster = false;
+      int sinks = 0;
+      for (odb::dbITerm* it : net->getITerms()) {
+        if (instClusterOf(it->getInst()) == cr.cluster_idx) {
+          in_cluster = true;
+        }
+        if (it->getIoType() != odb::dbIoType::OUTPUT) {
+          ++sinks;
+        }
+      }
+      if (in_cluster) {
+        fanout_sum += sinks;
+        ++net_count;
+      }
+    }
+    ASSERT_GT(net_count, 0) << "cluster " << cr.cluster_idx;
+    const double expected =
+        static_cast<double>(fanout_sum) / net_count;
+    EXPECT_NEAR(cr.avg_fanout_c, expected, 1e-9) << "cluster " << cr.cluster_idx;
   }
 }
 

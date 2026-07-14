@@ -421,7 +421,14 @@ set (exactly one alone is a validation error).
   by this same pass, always counts as "outside every cluster" — both are,
   definitionally, boundary/external). `G_c < 2` or `T_c < 1` is degenerate
   and skipped (logged). Background mirrors this with `cluster_id == -1`,
-  plus nets entirely inside the background that reach a PI/PO bTerm.
+  plus nets entirely inside the background that reach a PI/PO bTerm. Each
+  non-degenerate cluster also gets `avg_fanout_c`: the mean fanout (load
+  `dbITerm`s, driver excluded — the same convention `reportDesignSummary`
+  uses) over every net with **at least one** connected iterm owned by a
+  cluster-`c` instance — a broader membership rule than `T_c`'s cut nets,
+  which additionally require an endpoint *outside* the cluster (a net
+  wired entirely within the cluster counts toward `avg_fanout_c` but not
+  `T_c`). Not computed for the background (only per-cluster).
 - **Step 6 — actual Rent for the full design**: `p_actual = log(T_actual) /
   log(G)`, `k_actual = T_actual / G^p_actual`. Note this formula (the
   brief's own, and reused identically for `p_c`/`k_c` and `p_bg`/`k_bg`) is

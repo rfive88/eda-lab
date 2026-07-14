@@ -1975,6 +1975,17 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
       }
       return clusters;
     };
+    // A net's fanout: load dbITerms, driver excluded — the same iterm-only
+    // convention reportDesignSummary uses (bTerms not counted either way).
+    auto netFanout = [](odb::dbNet* net) {
+      int sinks = 0;
+      for (odb::dbITerm* it : net->getITerms()) {
+        if (it->getIoType() != odb::dbIoType::OUTPUT) {
+          ++sinks;
+        }
+      }
+      return sinks;
+    };
 
     const int num_clusters = spec.num_peak_clusters.value_or(1);
     for (int c = 0; c < num_clusters; ++c) {
@@ -1985,11 +1996,20 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
         }
       }
       int T_c = 0;
+      // avg_fanout_c: every net with >= 1 iterm owned by a cluster-c
+      // instance — a broader membership rule than T_c's cut-net one (no
+      // requirement that the net also reach outside the cluster).
+      long fanout_sum_c = 0;
+      int nets_in_c = 0;
       for (odb::dbNet* net : builder.block()->getNets()) {
         bool touches_boundary = false;
         const std::vector<int> clusters = touchedClusters(net, &touches_boundary);
         const bool in_c = std::any_of(clusters.begin(), clusters.end(),
                                       [c](int x) { return x == c; });
+        if (in_c) {
+          fanout_sum_c += netFanout(net);
+          ++nets_in_c;
+        }
         const bool out_c =
             touches_boundary
             || std::any_of(clusters.begin(), clusters.end(),
@@ -2013,6 +2033,8 @@ RentStats applyPrimaryIoStageE1(NetlistBuilder& builder,
       cr.T_c = T_c;
       cr.p_c = std::log(T_c) / std::log(G_c);
       cr.k_c = T_c / std::pow(G_c, cr.p_c);
+      cr.avg_fanout_c =
+          nets_in_c > 0 ? static_cast<double>(fanout_sum_c) / nets_in_c : 0.0;
       stats.cluster_rent.push_back(cr);
     }
 

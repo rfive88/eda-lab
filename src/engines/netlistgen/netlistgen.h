@@ -339,6 +339,14 @@ struct ClusterRentStats
                     // boundary buf/FF instance)
   double p_c = 0.0;
   double k_c = 0.0;
+  // Average fanout (load dbITerms, driver excluded) over every net with AT
+  // LEAST ONE connected iterm owned by an instance in this cluster — a
+  // broader set than T_c's cut nets (which also require an endpoint
+  // OUTSIDE the cluster): a net entirely internal to the cluster counts
+  // here but not toward T_c. 0.0 if the cluster has no such net (cannot
+  // happen for a non-degenerate cluster, since G_c >= 2 implies at least
+  // one net touches it).
+  double avg_fanout_c = 0.0;
 };
 
 // Statistics and generated artifacts from Stage E1 (primary I/O generation

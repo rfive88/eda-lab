@@ -85,6 +85,32 @@ mutated.
   warning (`utl::UKN`, id 130) for any vertex of degree
   `> kHighDegreeWarnThreshold` (64) that scoring it may be slow.
 
+### Local Rent exponent / tangle score (Spike C4)
+
+`tangle_score(hg, k_hop_radius = 2, logger?)` writes a per-vertex **local Rent
+exponent** into the `"hgm.tangle_score"` **double** plane (Alpert et al., DAC
+2010). For each vertex `u` it inspects the k-hop induced subgraph centred on
+`u` — **never materialized** as its own structure; `G` and `T` are computed
+inline during the BFS:
+
+- **G** = number of vertices within `k_hop_radius` hops of `u` (a BFS
+  collecting the `internal` set, `u` included).
+- **T** = boundary terminals: for every hyperedge with at least one internal
+  **and** at least one external member, each of its internal members counts as
+  one crossing pin. Hyperedges incident to the internal set are scanned once
+  (deduplicated) — no double counting.
+- **p** = `log(T) / log(G)`, clamped to `[0, 1]`; `G <= 1` or `T == 0` (a
+  single-vertex or fully enclosed subgraph) yields `p = 0`.
+
+`p ≈ 0` marks a well-encapsulated, datapath-like region; `p ≈ 1` marks a
+cluster with as many terminals as cells — highly tangled, a routing-congestion
+predictor. The upper clamp (`p > 1`) is pathological (more terminal pins than
+cells, typical of very small induced subgraphs); when a `logger` is attached
+and clamping fires on **more than 5%** of vertices, a warning (`utl::UKN`, id
+131) flags that `k_hop_radius` may be too small for the netlist. Per the C4
+brief, `tangle_score` takes the hypergraph by **non-const** reference (it
+writes the plane) but never mutates the CSR topology.
+
 `DistributionStats { mean, p90, p99, max }` is defined once in
 `congestion_metrics.h` and reused by `timing_metrics.h`. `p90`/`p99` are
 nearest-rank percentiles over the sorted value set (`std::nth_element`,
@@ -103,11 +129,12 @@ functions).
 
 The distribution functions read only the hypergraph's CSR topology
 (`vertexOffsets()`, `hyperedgeOffsets()`, `numVertices()`, `numHyperedges()`)
-and write no planes. `k_core_numbers` and the three NESS functions
-additionally read `vertexPinList()` and `pinList()`, and each **writes** one
-vertex plane — `"hgm.k_core"` (int), `"hgm.neighborhood_density"` (double),
-`"hgm.neighborhood_size_1hop"` (int), `"hgm.net_intersection_score"` (int) —
-as their only mutation; the CSR topology is left untouched.
+and write no planes. `k_core_numbers`, the three NESS functions, and
+`tangle_score` additionally read `vertexPinList()` and `pinList()`, and each
+**writes** one vertex plane — `"hgm.k_core"` (int),
+`"hgm.neighborhood_density"` (double), `"hgm.neighborhood_size_1hop"` (int),
+`"hgm.net_intersection_score"` (int), `"hgm.tangle_score"` (double) — as their
+only mutation; the CSR topology is left untouched.
 
 ## Control parameters
 
@@ -119,6 +146,8 @@ as their only mutation; the CSR topology is left untouched.
 | `alpha` (`neighborhood_density`) | `double` | `0.5` | per-hop decay factor in `(0,1)`; `0` yields an all-zero plane |
 | `h` (`neighborhood_density`) | `int` | `2` | max hop depth of the propagation BFS; `0` (or negative) yields an all-zero plane |
 | `logger` (`net_intersection_score`) | `utl::Logger*` | `nullptr` | optional; warns (id 130) for any vertex of degree `> 64`, whose quadratic pair enumeration may be slow |
+| `k_hop_radius` (`tangle_score`) | `int` | `2` | hop radius of the induced subgraph whose local Rent exponent is scored |
+| `logger` (`tangle_score`) | `utl::Logger*` | `nullptr` | optional; warns (id 131) when the `p > 1` clamp fires on more than 5% of vertices (`k_hop_radius` likely too small) |
 
 ## Timing metrics (`timing_metrics.h/.cpp`)
 
@@ -160,3 +189,13 @@ star (all 4), two disjoint 3-pin edges (all 2), and an isolated vertex (0);
 on two hyperedges sharing three vertices (score 2 for the shared vertices, 0
 for single-net and isolated vertices); and a check that all three planes exist
 with the right type and one value per vertex.
+
+The `TangleScoreTest` suite covers the local Rent exponent: an isolated vertex
+(`G=1 → p=0`), a fully enclosed subgraph (`T=0 → p=0`), a construction that
+genuinely yields `G=4, T=4 → p=1.0` under the BFS, a datapath-like bus
+(`G=8, T=2 → p=log2/log8=1/3`), a dense region captured only at
+`k_hop_radius=2` (radius-2 score `≥` radius-1 score, exact values checked), and
+plane existence/type. The `p=1.0` case departs from the brief's literal
+topology, which cannot reach `G=4` under a straightforward BFS (a query
+vertex's own external neighbor enters the ball at hop 1); the equivalent
+construction produces the same `G, T, p` the brief intends.

@@ -8,8 +8,10 @@ arrays but writes a structural-centrality result into the `"hgm.k_core"`
 attribute plane. Spike C3 adds three label-weighted neighborhood metrics —
 `neighborhood_density` (a NESS propagation BFS), `one_hop_neighborhood_size`,
 and `net_intersection_score` — each reading the CSR arrays and writing its own
-per-vertex `"hgm."` plane. A stub `timing_metrics.h/.cpp` keeps the build
-complete for a later brief.
+per-vertex `"hgm."` plane. Spike C4 adds `tangle_score`, the local Rent
+exponent of each vertex's k-hop induced subgraph (computed inline during a
+BFS, never materialized), written to `"hgm.tangle_score"`. A stub
+`timing_metrics.h/.cpp` keeps the build complete for a later brief.
 
 ## `congestion_metrics.h` — API contract
 
@@ -34,6 +36,7 @@ graph TD
     G --> I["neighborhood_density(hg, alpha, h)<br/>writes 'hgm.neighborhood_density' (double)"]
     G --> J["one_hop_neighborhood_size(hg)<br/>writes 'hgm.neighborhood_size_1hop' (int)"]
     G --> K["net_intersection_score(hg, logger?)<br/>writes 'hgm.net_intersection_score' (int)"]
+    G --> L["tangle_score(hg, k_hop_radius, logger?)<br/>writes 'hgm.tangle_score' (double)"]
 ```
 
 ## `congestion_metrics.cpp` — implementation
@@ -231,6 +234,58 @@ graph TD
     K --> C
 ```
 
+### Function group: local Rent exponent / tangle score (Spike C4)
+
+`tangle_score(hg, k_hop_radius, logger?)` scores each vertex `u` by the Rent
+exponent of its k-hop induced subgraph. The subgraph is **never materialized**:
+a per-source BFS builds only the `internal` vertex set (an
+`std::unordered_set<int>`, whose insert-returns-new flag doubles as the BFS
+visited test), then an inline scan of the hyperedges incident to that set —
+deduplicated through an `std::unordered_set<HyperedgeId>` — accumulates the
+boundary-terminal count `T`. `G = |internal|`, and `p = log(T)/log(G)` clamped
+to `[0,1]` (with the `G<=1 || T==0` short-circuit to 0). A run-wide
+`clamp_count` drives the single >5% warning after the outer loop.
+
+```mermaid
+graph TD
+    A["tangle_score(hg, k_hop_radius, logger?)"] --> B["tangle = vertexDoublePlane('hgm.tangle_score'); fill 0"]
+    B --> C{"numVertices()==0?"}
+    C -- yes --> Z["return"]
+    C -- no --> D["for each vertex u:"]
+    D --> E["<b>Step 1 BFS</b>: internal={u}; queue={(u,0)}"]
+    E --> F{"queue empty?"}
+    F -- no --> G["(v,depth)=pop_front"]
+    G --> H{"depth >= k_hop_radius?"}
+    H -- yes --> F
+    H -- no --> I["for each incident edge e of v,<br/>each member w of e:<br/>if internal.insert(w).second:<br/>queue.push((w,depth+1))"]
+    I --> F
+    F -- yes --> J["G = internal.size()"]
+    J --> K["<b>Step 2 terminals</b>: seen_edges={}; T=0<br/>for each v in internal, each incident edge e:"]
+    K --> L{"e already in seen_edges?"}
+    L -- yes --> K
+    L -- no --> M["n_internal = members of e in internal;<br/>n_external = size(e) - n_internal"]
+    M --> N{"n_external > 0?"}
+    N -- yes --> O["T += n_internal"]
+    N -- no --> K
+    O --> K
+    K --> P["<b>Step 3</b>: p = 0"]
+    P --> Q{"G>1 and T>0?"}
+    Q -- no --> R["tangle[u] = 0"]
+    Q -- yes --> S["raw = log(T)/log(G);<br/>if raw>1: ++clamp_count;<br/>p = clamp(raw, 0, 1)"]
+    S --> T2["tangle[u] = p"]
+    R --> D
+    T2 --> D
+    D --> U{"logger and clamp_count*20 > n?"}
+    U -- yes --> V["warn(UKN, 131, 'clamped on >5% of vertices')"]
+```
+
+`T` counts *internal* pins of boundary-crossing hyperedges — a hyperedge that
+straddles the boundary (`n_external > 0`) contributes one terminal per internal
+member. A fully enclosed subgraph (`n_external == 0` on every incident edge)
+therefore has `T == 0` and scores 0. The `internal` set and the two scratch
+`unordered_set`s are the only per-vertex state — the CSR arrays are read-only,
+and only the output plane is written.
+
 ## `timing_metrics.h` / `timing_metrics.cpp` — stub
 
 `timing_metrics.h` only pulls in `congestion_metrics.h` for the shared
@@ -267,10 +322,12 @@ sequenceDiagram
     hg_metrics->>Hypergraph: CSR arrays (read) + vertexIntPlane("hgm.neighborhood_size_1hop") (write)
     Caller->>hg_metrics: net_intersection_score(hg, logger)
     hg_metrics->>Hypergraph: CSR arrays (read) + vertexIntPlane("hgm.net_intersection_score") (write)
+    Caller->>hg_metrics: tangle_score(hg, k_hop_radius, logger)
+    hg_metrics->>Hypergraph: CSR arrays (read) + vertexDoublePlane("hgm.tangle_score") (write)
 ```
 
 The distribution functions never mutate the hypergraph — every arrow for
-them is a read of the existing CSR arrays. `k_core_numbers` and the three C3
-neighborhood functions are the exceptions: each reads the same CSR arrays but
-*writes* one `"hgm."` attribute plane as its only side effect; the CSR
-topology is untouched.
+them is a read of the existing CSR arrays. `k_core_numbers`, the three C3
+neighborhood functions, and `tangle_score` are the exceptions: each reads the
+same CSR arrays but *writes* one `"hgm."` attribute plane as its only side
+effect; the CSR topology is untouched.

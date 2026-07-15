@@ -3,8 +3,11 @@
 #include "hg_metrics/congestion_metrics.h"
 
 #include <algorithm>
+#include <cmath>
 #include <deque>
 #include <list>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "support/logging.h"
@@ -22,9 +25,10 @@ constexpr const char* kGroup = "hg_metrics";
 // Message-id block for hg_metrics warn()/info() lines. The repo partitions
 // ids across the shared utl::UKN namespace (see src/support/logging.h:
 // hypergraph 100-119, fm 120-129, hello_odb 200-209, netlistgen 300-349);
-// hg_metrics claims 130-149. debugPrint takes no id, so only the C3
-// high-degree warning below needs one so far.
-constexpr int kMsgHighDegree = 130;
+// hg_metrics claims 130-149. debugPrint takes no id, so only the C3/C4
+// warnings below need them so far.
+constexpr int kMsgHighDegree = 130;    // C3 net_intersection_score
+constexpr int kMsgTangleClamp = 131;   // C4 tangle_score clamp rate
 
 // Above this incident-hyperedge count, net_intersection_score's per-vertex
 // pair enumeration (quadratic in degree) may be slow; warn once per such
@@ -431,6 +435,100 @@ void net_intersection_score(eda::Hypergraph& hg, utl::Logger* logger)
       }
     }
     score[u] = static_cast<int>(total);
+  }
+}
+
+void tangle_score(eda::Hypergraph& hg, const int k_hop_radius,
+                  utl::Logger* logger)
+{
+  const int n = hg.numVertices();
+  std::vector<double>& tangle = hg.vertexDoublePlane("hgm.tangle_score");
+  std::fill(tangle.begin(), tangle.end(), 0.0);
+  if (n == 0) {
+    return;
+  }
+
+  const std::vector<int>& v_off = hg.vertexOffsets();
+  const std::vector<int>& v_pins = hg.vertexPinList();  // v -> incident edges
+  const std::vector<int>& e_off = hg.hyperedgeOffsets();
+  const std::vector<int>& e_pins = hg.pinList();         // e -> member vertices
+
+  int clamp_count = 0;  // vertices whose raw Rent exponent exceeded 1.0
+
+  for (int u = 0; u < n; ++u) {
+    // Step 1: BFS to depth k_hop_radius, collecting the internal vertex set.
+    // The induced subgraph is never materialized — `internal` and the inline
+    // terminal scan below are all the state we keep.
+    std::unordered_set<int> internal;
+    internal.insert(u);
+    std::deque<std::pair<int, int>> queue;  // (vertex, depth)
+    queue.emplace_back(u, 0);
+    while (!queue.empty()) {
+      const std::pair<int, int> front = queue.front();
+      queue.pop_front();
+      const int v = front.first;
+      const int depth = front.second;
+      if (depth >= k_hop_radius) {
+        continue;
+      }
+      for (int i = v_off[v]; i < v_off[v + 1]; ++i) {
+        const int e = v_pins[i];
+        for (int j = e_off[e]; j < e_off[e + 1]; ++j) {
+          const int w = e_pins[j];
+          if (internal.insert(w).second) {  // newly discovered at this depth
+            queue.emplace_back(w, depth + 1);
+          }
+        }
+      }
+    }
+    const int g = static_cast<int>(internal.size());
+
+    // Step 2: count boundary terminals T. Scan every hyperedge incident to an
+    // internal vertex once (dedup via seen_edges); a hyperedge with any
+    // external member contributes its internal members as crossing pins.
+    long long terminals = 0;
+    std::unordered_set<HyperedgeId> seen_edges;
+    for (const int v : internal) {
+      for (int i = v_off[v]; i < v_off[v + 1]; ++i) {
+        const HyperedgeId e = v_pins[i];
+        if (!seen_edges.insert(e).second) {
+          continue;  // already accounted for through another internal member
+        }
+        const int size = e_off[e + 1] - e_off[e];
+        int n_internal = 0;
+        for (int j = e_off[e]; j < e_off[e + 1]; ++j) {
+          if (internal.count(e_pins[j]) != 0) {
+            ++n_internal;
+          }
+        }
+        if (size - n_internal > 0) {  // boundary-crossing hyperedge
+          terminals += n_internal;
+        }
+      }
+    }
+
+    // Step 3: Rent exponent p = log(T)/log(G), clamped to [0, 1]. G <= 1 or
+    // T == 0 (a fully enclosed or single-vertex subgraph) scores 0.
+    double p = 0.0;
+    if (g > 1 && terminals > 0) {
+      const double raw = std::log(static_cast<double>(terminals))
+                         / std::log(static_cast<double>(g));
+      if (raw > 1.0) {
+        ++clamp_count;
+      }
+      p = std::clamp(raw, 0.0, 1.0);
+    }
+    tangle[u] = p;
+  }
+
+  // Warn only when the pathological clamp is widespread (> 5% of vertices),
+  // signalling the k_hop_radius may be too small for this netlist.
+  if (logger != nullptr && clamp_count * 20 > n) {
+    logger->warn(utl::UKN, kMsgTangleClamp,
+                 "tangle_score: Rent exponent clamped to 1.0 on {} of {} "
+                 "vertices ({:.1f}%) — induced subgraphs with more terminals "
+                 "than cells; k_hop_radius may be too small",
+                 clamp_count, n, 100.0 * clamp_count / n);
   }
 }
 

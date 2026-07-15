@@ -110,4 +110,25 @@ void one_hop_neighborhood_size(eda::Hypergraph& hg);
 // slow to score.
 void net_intersection_score(eda::Hypergraph& hg, utl::Logger* logger = nullptr);
 
+// --- Local Rent exponent / tangle score (Spike C4) ---
+
+// Computes a per-vertex tangle score: the local Rent exponent of the k-hop
+// induced subgraph centred on each vertex (Alpert et al., DAC 2010). For each
+// vertex u, a BFS collects the set of vertices within k_hop_radius hops
+// (G = that set's size) and — without materializing the subgraph — counts
+// boundary terminals T: for every hyperedge with >= 1 internal and >= 1
+// external member, each of its internal members is one crossing pin. The Rent
+// exponent is
+//   p = log(T) / log(G),  clamped to [0.0, 1.0]
+// with p = 0.0 whenever G <= 1 or T == 0. A high p means the local cluster is
+// anomalously connected for its size (as many terminals as cells) — a routing-
+// congestion predictor; p close to 0 marks a well-encapsulated, datapath-like
+// region. Writes the "hgm.tangle_score" double plane on vertices (created if
+// absent, overwritten in place if present). If attached, `logger` warns when
+// the upper clamp (p > 1 — more terminals than cells, typical of tiny induced
+// subgraphs) fires on more than 5% of vertices.
+//   k_hop_radius: hop radius of the induced subgraph. Default 2.
+void tangle_score(eda::Hypergraph& hg, int k_hop_radius = 2,
+                  utl::Logger* logger = nullptr);
+
 }  // namespace hgm

@@ -4,6 +4,7 @@
 // Hypergraph::buildFromTopology — no data files needed.
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -374,6 +375,104 @@ TEST(NessPlanesTest, AllThreePlanesExistWithCorrectShape)
   EXPECT_EQ(hg.vertexDoublePlane("hgm.neighborhood_density").size(), 5u);
   EXPECT_EQ(hg.vertexIntPlane("hgm.neighborhood_size_1hop").size(), 5u);
   EXPECT_EQ(hg.vertexIntPlane("hgm.net_intersection_score").size(), 5u);
+}
+
+// --- Local Rent exponent / tangle score (Spike C4) ---
+
+TEST(TangleScoreTest, IsolatedVertexScoresZero)
+{
+  // Vertex 2 is in no hyperedge: its induced subgraph is {2}, G=1 -> p=0.
+  Hypergraph hg;
+  hg.buildFromTopology(3, {{0, 1}});
+
+  tangle_score(hg, 2);
+  const std::vector<double>& p = hg.vertexDoublePlane("hgm.tangle_score");
+  ASSERT_EQ(p.size(), 3u);
+  EXPECT_DOUBLE_EQ(p[2], 0.0);
+}
+
+TEST(TangleScoreTest, FullyEnclosedSubgraphScoresZero)
+{
+  // A single 3-pin hyperedge with no external connections. Any radius induces
+  // {0,1,2}; the lone hyperedge has no external member, so T=0 -> p=0.
+  Hypergraph hg;
+  hg.buildFromTopology(3, {{0, 1, 2}});
+
+  tangle_score(hg, 2);
+  const std::vector<double>& p = hg.vertexDoublePlane("hgm.tangle_score");
+  ASSERT_EQ(p.size(), 3u);
+  for (const double v : p) {
+    EXPECT_DOUBLE_EQ(v, 0.0);
+  }
+}
+
+TEST(TangleScoreTest, KnownRentExponentOne)
+{
+  // Brief test 3 (G=4, T=4, p=log4/log4=1.0). The brief's own topology can't
+  // reach G=4 under BFS (u's external neighbor enters the ball at hop 1), so
+  // this is an equivalent construction that genuinely yields G=4, T=4:
+  //   e0={0,1,2,3} binds the internal ball; frontier vertices 1,2,3 carry the
+  //   boundary crossings via e1={1,2,3,4} (3 internal terminals) and
+  //   e2={1,5} (1 internal terminal). At radius 1 from u=0 the ball is exactly
+  //   {0,1,2,3} (0 is only in e0), and 4,5 sit at distance 2 (external).
+  Hypergraph hg;
+  hg.buildFromTopology(6, {{0, 1, 2, 3}, {1, 2, 3, 4}, {1, 5}});
+
+  tangle_score(hg, 1);
+  const std::vector<double>& p = hg.vertexDoublePlane("hgm.tangle_score");
+  // u=0: G=4, T = 3 (e1) + 1 (e2) = 4, p = log(4)/log(4) = 1.0.
+  EXPECT_DOUBLE_EQ(p[0], 1.0);
+}
+
+TEST(TangleScoreTest, DatapathLikeStructure)
+{
+  // Brief test 4: a bus of 8 vertices in one internal hyperedge, plus 2
+  // external nets (2 terminals). Externals hang off vertices 6 and 7 (not the
+  // query vertex 0) so at radius 1 the ball is exactly the 8 bus vertices and
+  // the external endpoints 8,9 sit at distance 2.
+  //   e0={0..7} bus; e1={6,8}, e2={7,9} external.
+  //   G=8, T=2, p = log(2)/log(8) = 1/3.
+  Hypergraph hg;
+  hg.buildFromTopology(
+      10, {{0, 1, 2, 3, 4, 5, 6, 7}, {6, 8}, {7, 9}});
+
+  tangle_score(hg, 1);
+  const std::vector<double>& p = hg.vertexDoublePlane("hgm.tangle_score");
+  EXPECT_NEAR(p[0], std::log(2.0) / std::log(8.0), 1e-6);
+  EXPECT_NEAR(p[0], 1.0 / 3.0, 1e-6);
+}
+
+TEST(TangleScoreTest, RadiusTwoCapturesMoreOfDenseRegion)
+{
+  // The tangled region sits at distance 2 from vertex 0, reached through the
+  // bridge vertex chain. radius=1 sees a small, lightly-crossing ball;
+  // radius=2 pulls the dense boundary in, so the score rises.
+  //   e0={0,1,2}; e1={1,3}; e2={2,4}; e3={3,5}; e4={4,6}; e5={3,4,7}.
+  //   radius 1 from 0: internal={0,1,2}, T from e1,e2 = 2, p=log2/log3≈0.631.
+  //   radius 2 from 0: internal={0,1,2,3,4}, T from e3,e4 (1 each) + e5 (2) =
+  //     4, p=log4/log5≈0.861.  (externals 5,6,7 stay at distance 3.)
+  Hypergraph hg;
+  hg.buildFromTopology(
+      8, {{0, 1, 2}, {1, 3}, {2, 4}, {3, 5}, {4, 6}, {3, 4, 7}});
+
+  tangle_score(hg, 1);
+  const double r1 = hg.vertexDoublePlane("hgm.tangle_score")[0];
+  tangle_score(hg, 2);
+  const double r2 = hg.vertexDoublePlane("hgm.tangle_score")[0];
+
+  EXPECT_NEAR(r1, std::log(2.0) / std::log(3.0), 1e-6);
+  EXPECT_NEAR(r2, std::log(4.0) / std::log(5.0), 1e-6);
+  EXPECT_GE(r2, r1);
+}
+
+TEST(TangleScoreTest, PlaneExistsAsDouble)
+{
+  Hypergraph hg;
+  hg.buildFromTopology(4, {{0, 1}, {1, 2}, {2, 3}});
+
+  tangle_score(hg);  // default k_hop_radius = 2
+  EXPECT_TRUE(hg.hasVertexPlane("hgm.tangle_score"));
+  EXPECT_EQ(hg.vertexDoublePlane("hgm.tangle_score").size(), 4u);
 }
 
 }  // namespace

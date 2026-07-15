@@ -50,16 +50,39 @@ graph TD
 `percentileIndex(n, p)` is the nearest-rank position in a 0-indexed sorted
 array of size `n`: `floor(p * (n - 1))`, clamped into `[0, n - 1]`.
 
+### Function group: vertex degree
+
 ```mermaid
 graph TD
-    A["vertex_degree_histogram(hg)"] --> B["histogramOf(csrSliceSizes(hg.vertexOffsets()))"]
-    C["vertex_degree_stats(hg, logger)"] --> D["computeStats(csrSliceSizes(hg.vertexOffsets()), logger, 'vertex_degree_stats')"]
-    E["hyperedge_size_histogram(hg)"] --> F["histogramOf(csrSliceSizes(hg.hyperedgeOffsets()))"]
-    G["hyperedge_size_stats(hg, logger)"] --> H["computeStats(csrSliceSizes(hg.hyperedgeOffsets()), logger, 'hyperedge_size_stats')"]
-    I["high_fanout_nets(hg, threshold)"] --> J["for e in [0, numHyperedges()):<br/>size = offsets[e+1] - offsets[e]"]
-    J --> K{"size >= threshold?"}
-    K -- yes --> L["result.push_back(e)"]
-    K -- no --> M["skip"]
+    A["vertex_degree_histogram(hg)"] --> B["csrSliceSizes(hg.vertexOffsets())<br/>-> per-vertex degree"]
+    B --> C["histogramOf(degrees)<br/>-> map&lt;degree, vertex_count&gt;"]
+
+    D["vertex_degree_stats(hg, logger)"] --> E["csrSliceSizes(hg.vertexOffsets())<br/>-> per-vertex degree"]
+    E --> F["computeStats(degrees, logger, 'vertex_degree_stats')<br/>-> DistributionStats"]
+```
+
+### Function group: hyperedge size (fanout)
+
+```mermaid
+graph TD
+    A["hyperedge_size_histogram(hg)"] --> B["csrSliceSizes(hg.hyperedgeOffsets())<br/>-> per-hyperedge pin count"]
+    B --> C["histogramOf(sizes)<br/>-> map&lt;pin_count, hyperedge_count&gt;"]
+
+    D["hyperedge_size_stats(hg, logger)"] --> E["csrSliceSizes(hg.hyperedgeOffsets())<br/>-> per-hyperedge pin count"]
+    E --> F["computeStats(sizes, logger, 'hyperedge_size_stats')<br/>-> DistributionStats"]
+```
+
+### Function group: high-fanout nets
+
+```mermaid
+graph TD
+    A["high_fanout_nets(hg, threshold)"] --> B["for e in [0, numHyperedges()):<br/>size = offsets[e+1] - offsets[e]"]
+    B --> C{"size >= threshold?"}
+    C -- yes --> D["result.push_back(e)"]
+    C -- no --> E["skip"]
+    D --> B
+    E --> B
+    B --> F["return result: vector&lt;HyperedgeId&gt;"]
 ```
 
 ## `timing_metrics.h` / `timing_metrics.cpp` — stub

@@ -22,7 +22,7 @@ routing congestion hot-spots.
 ```
 src/hg_metrics/congestion_metrics.h    ← add declaration
 src/hg_metrics/congestion_metrics.cpp  ← add implementation
-tests/hg_metrics/congestion_metrics_test.cpp  ← add test cases
+test/hg_metrics_congestion_test.cpp    ← add test cases
 ```
 
 ## API Addition
@@ -66,7 +66,7 @@ the hypergraph structure itself.
 
 ## Test Requirements
 
-Add to `congestion_metrics_test.cpp`:
+Add to `test/hg_metrics_congestion_test.cpp`:
 
 1. **Isolated vertices** — all get k_core = 0.
 2. **Path graph** (vertices 0-1-2-3 connected as a chain via single-pin hyperedges):
@@ -90,4 +90,4 @@ All tests must pass under `ctest` before proceeding to C3.
 
 ## Hard Gate
 
-Do not proceed to C3 until all tests in `tests/hg_metrics/` are green.
+Do not proceed to C3 until all tests in `test/` are green.

@@ -32,7 +32,7 @@ Two derived congestion metrics are also implemented here: `net_intersection_scor
 ```
 src/hg_metrics/congestion_metrics.h
 src/hg_metrics/congestion_metrics.cpp
-tests/hg_metrics/congestion_metrics_test.cpp
+test/hg_metrics_congestion_test.cpp
 ```
 
 ## API Additions
@@ -107,7 +107,7 @@ degree. Log a warning via `utl::Logger` if any vertex has degree > 64, noting th
 
 ## Test Requirements
 
-Add to `congestion_metrics_test.cpp`:
+Add to `test/hg_metrics_congestion_test.cpp`:
 
 1. **`one_hop_neighborhood_size`**:
    - Star topology (one central vertex in a single hyperedge of size 5): central vertex score = 4,
@@ -146,4 +146,4 @@ All tests must pass under `ctest` before proceeding to C4.
 
 ## Hard Gate
 
-Do not proceed to C4 until all tests in `tests/hg_metrics/` are green.
+Do not proceed to C4 until all tests in `test/` are green.

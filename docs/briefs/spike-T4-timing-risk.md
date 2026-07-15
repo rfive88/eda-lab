@@ -23,7 +23,7 @@ reconvergence, and cone size into a single risk ranking).
 ```
 src/hg_metrics/timing_metrics.h
 src/hg_metrics/timing_metrics.cpp
-tests/hg_metrics/timing_metrics_test.cpp
+test/hg_metrics_timing_test.cpp
 ```
 
 ## API Additions
@@ -86,7 +86,7 @@ If `"hgm.ball_size_2"` plane does not exist on the hypergraph, log a `utl::Logge
 
 ## Test Requirements
 
-Add to `tests/hg_metrics/timing_metrics_test.cpp`:
+Add to `test/hg_metrics_timing_test.cpp`:
 
 Manually pre-populate all required attribute planes on a hand-constructed hypergraph
 (bypassing T1/T2/T3 function calls to keep this brief's tests self-contained):

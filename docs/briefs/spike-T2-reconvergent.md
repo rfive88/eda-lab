@@ -26,7 +26,7 @@ sensitivity, and register-to-register depth directly bounds achievable clock fre
 ```
 src/hg_metrics/timing_metrics.h
 src/hg_metrics/timing_metrics.cpp
-tests/hg_metrics/timing_metrics_test.cpp
+test/hg_metrics_timing_test.cpp
 ```
 
 ## API Additions
@@ -90,7 +90,7 @@ path "restarts" at each register boundary.
 
 ## Test Requirements
 
-Add to `tests/hg_metrics/timing_metrics_test.cpp`:
+Add to `test/hg_metrics_timing_test.cpp`:
 
 ### `mark_reconvergent_vertices`
 

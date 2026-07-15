@@ -25,7 +25,7 @@ direct proxy for timing cone size and is an input to the T4 timing risk composit
 ```
 src/hg_metrics/timing_metrics.h
 src/hg_metrics/timing_metrics.cpp
-tests/hg_metrics/timing_metrics_test.cpp
+test/hg_metrics_timing_test.cpp
 ```
 
 ## API Additions
@@ -129,7 +129,7 @@ For `vertex_ball_sizes`: run HyperANF for exactly `t` iterations (not to converg
 
 ## Test Requirements
 
-Add to `tests/hg_metrics/timing_metrics_test.cpp`:
+Add to `test/hg_metrics_timing_test.cpp`:
 
 1. **Single vertex, no edges**: N(0) ≈ 1 (one self-pair), neighbourhood_function returns [1.0].
    effective_diameter = 0.

@@ -34,8 +34,18 @@ Implement two prerequisites that all timing metric functions (T1–T4) depend on
 ```
 src/hg_metrics/timing_metrics.h    ← replace stub with full content
 src/hg_metrics/timing_metrics.cpp  ← replace stub with full content
-tests/hg_metrics/timing_metrics_test.cpp  ← create new file
-tests/hg_metrics/CMakeLists.txt    ← add timing_metrics_test
+test/hg_metrics_timing_test.cpp    ← create new file
+CMakeLists.txt (root)              ← add hg_metrics_timing_test executable + add_test entry
+
+The root CMakeLists.txt is the only build file. Add the following two blocks
+(following the pattern of existing test targets):
+
+  add_executable(hg_metrics_timing_test test/hg_metrics_timing_test.cpp)
+  target_link_libraries(hg_metrics_timing_test PRIVATE hg_metrics hypergraph
+                                                        odb utl GTest::gtest
+                                                        GTest::gtest_main)
+
+  add_test(NAME hg_metrics_timing_test COMMAND hg_metrics_timing_test)
 ```
 
 ## API
@@ -139,7 +149,7 @@ Use an explicit stack instead of recursion to avoid stack overflow on deep netli
 
 ## Test Requirements
 
-Create `tests/hg_metrics/timing_metrics_test.cpp`:
+Create `test/hg_metrics_timing_test.cpp`:
 
 Note: `annotate_timing_attributes` requires a live ODB block — test it with a minimal ODB
 fixture if available, or write an integration-style test that loads the GCD DEF. If neither is
@@ -174,7 +184,7 @@ All tests must pass under `ctest` before proceeding to T1.
 - [ ] `TimingDAG` struct includes `topo_order`, `adj`, `radj`, `broken_edges`
 - [ ] `"hgm.cycle_edge"` bool plane written on broken hyperedges
 - [ ] Explicit DFS stack (no recursion)
-- [ ] `tests/hg_metrics/timing_metrics_test.cpp` created and wired into CMakeLists
+- [ ] `test/hg_metrics_timing_test.cpp` created and wired into root `CMakeLists.txt`
 - [ ] All timing gtest cases green
 - [ ] `FLOW.md` updated with DAG construction + cycle-breaking diagram
 - [ ] Committed with message `hg_metrics: T0 ODB annotation + TimingDAG`

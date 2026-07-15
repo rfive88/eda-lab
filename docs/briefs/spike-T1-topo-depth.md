@@ -22,7 +22,7 @@ is run.
 ```
 src/hg_metrics/timing_metrics.h
 src/hg_metrics/timing_metrics.cpp
-tests/hg_metrics/timing_metrics_test.cpp
+test/hg_metrics_timing_test.cpp
 ```
 
 ## API Additions
@@ -64,7 +64,7 @@ Read `"hgm.topo_depth"` plane from all vertices. Build and return `std::map<int,
 
 ## Test Requirements
 
-Add to `tests/hg_metrics/timing_metrics_test.cpp`:
+Add to `test/hg_metrics_timing_test.cpp`:
 
 1. **Linear chain A→B→C→D**: depths = A:0, B:1, C:2, D:3. Return value = 3.
 

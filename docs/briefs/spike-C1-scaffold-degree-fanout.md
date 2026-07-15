@@ -23,7 +23,6 @@ structure, CMake plumbing, README, and FLOW.md that subsequent briefs (C2–C4, 
 
 ```
 src/hg_metrics/
-├── CMakeLists.txt
 ├── README.md
 ├── FLOW.md
 ├── congestion_metrics.h
@@ -31,15 +30,19 @@ src/hg_metrics/
 ├── timing_metrics.h          ← stub only
 └── timing_metrics.cpp        ← stub only
 
-tests/hg_metrics/
-├── CMakeLists.txt
-└── congestion_metrics_test.cpp
+test/hg_metrics_congestion_test.cpp
 ```
 
 ## Files to Modify
 
-- `src/CMakeLists.txt` — add `add_subdirectory(hg_metrics)`
-- `tests/CMakeLists.txt` — add `add_subdirectory(hg_metrics)`
+- `CMakeLists.txt` (root) — the `hg_metrics` library target and `hg_metrics_congestion_test`
+  executable are already registered. Add `congestion_metrics.cpp` and `timing_metrics.cpp` to
+  the `hg_metrics` `add_library(...)` source list if not already present. The test executable
+  entry already points at `test/hg_metrics_congestion_test.cpp`.
+
+  **Note:** The repo has one monolithic root `CMakeLists.txt`. There are no per-module or
+  per-directory CMakeLists files anywhere. All library targets, executables, and `add_test()`
+  calls live in the root file.
 
 ## API
 
@@ -96,7 +99,7 @@ std::vector<HyperedgeId> high_fanout_nets(const Hypergraph& hg, int threshold);
 
 ## Test Requirements
 
-Cover all of the following in `congestion_metrics_test.cpp`:
+Cover all of the following in `test/hg_metrics_congestion_test.cpp`:
 
 1. **Empty hypergraph** — all functions return empty maps / zero stats / empty vectors without crash.
 2. **Single vertex, no hyperedges** — degree histogram is `{0: 1}`, size histogram empty.
@@ -114,9 +117,9 @@ All tests must pass under `ctest` before proceeding to C2.
 
 ## Deliverables Checklist
 
-- [ ] `src/hg_metrics/` directory with all files above
-- [ ] `tests/hg_metrics/` directory with CMakeLists and test file
-- [ ] Both added to parent CMakeLists files
+- [ ] `src/hg_metrics/` directory with all source/header files above
+- [ ] `test/hg_metrics_congestion_test.cpp` created with all C1 test cases
+- [ ] Root `CMakeLists.txt` `hg_metrics` library and test executable verified correct
 - [ ] `timing_metrics.h/.cpp` stubs compile cleanly (no warnings)
 - [ ] All C1 gtest cases green
 - [ ] `src/hg_metrics/README.md` written (module purpose, public API summary, build instructions)
@@ -125,5 +128,5 @@ All tests must pass under `ctest` before proceeding to C2.
 
 ## Hard Gate
 
-Do not proceed to C2, C3, C4, or any timing brief until all tests in `tests/hg_metrics/` are
-green under `ctest` and the commit is clean.
+Do not proceed to C2, C3, C4, or any timing brief until all tests in `test/` are green under
+`ctest` and the commit is clean.

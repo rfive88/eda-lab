@@ -23,7 +23,7 @@ per the Alpert et al. (DAC 2010) paper.
 ```
 src/hg_metrics/congestion_metrics.h
 src/hg_metrics/congestion_metrics.cpp
-tests/hg_metrics/congestion_metrics_test.cpp
+test/hg_metrics_congestion_test.cpp
 ```
 
 ## API Addition
@@ -86,7 +86,7 @@ not matter as long as it is consistent.
 
 ## Test Requirements
 
-Add to `congestion_metrics_test.cpp`:
+Add to `test/hg_metrics_congestion_test.cpp`:
 
 1. **Isolated vertex** (G=1): tangle_score = 0.0.
 
@@ -124,5 +124,5 @@ All tests must pass under `ctest`.
 
 ## Hard Gate
 
-All tests in `tests/hg_metrics/` must be green before this brief is considered complete.
+All tests in `test/` must be green before this brief is considered complete.
 C4 has no downstream dependents in the congestion track; the timing track (T0–T4) is independent.

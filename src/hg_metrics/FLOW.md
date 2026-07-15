@@ -5,8 +5,11 @@ Spike C1 implements the congestion metric group — vertex degree distribution,
 hyperedge size (fanout) distribution, and high-fanout net identification —
 all read-only; Spike C2 adds `k_core_numbers`, which reads the same CSR
 arrays but writes a structural-centrality result into the `"hgm.k_core"`
-attribute plane. A stub `timing_metrics.h/.cpp` keeps the build complete for
-a later brief.
+attribute plane. Spike C3 adds three label-weighted neighborhood metrics —
+`neighborhood_density` (a NESS propagation BFS), `one_hop_neighborhood_size`,
+and `net_intersection_score` — each reading the CSR arrays and writing its own
+per-vertex `"hgm."` plane. A stub `timing_metrics.h/.cpp` keeps the build
+complete for a later brief.
 
 ## `congestion_metrics.h` — API contract
 
@@ -16,8 +19,9 @@ module has no dedicated stable id type, only the snapshot-local CSR index),
 the five read-only distribution functions —
 `vertex_degree_histogram`/`vertex_degree_stats`,
 `hyperedge_size_histogram`/`hyperedge_size_stats`, `high_fanout_nets` — and
-(Spike C2) `k_core_numbers`, the one function here that takes the hypergraph
-by non-const reference because it writes the `"hgm.k_core"` int plane.
+(Spike C2) `k_core_numbers` and (Spike C3) `neighborhood_density`,
+`one_hop_neighborhood_size`, `net_intersection_score` — the plane-writing
+functions that take the hypergraph by non-const reference.
 
 ```mermaid
 graph TD
@@ -27,6 +31,9 @@ graph TD
     A --> E["hyperedge_size_stats(hg, logger?)<br/>-> DistributionStats"]
     A --> F["high_fanout_nets(hg, threshold)<br/>-> vector&lt;HyperedgeId&gt;"]
     G["eda::Hypergraph& hg (mutable)"] --> H["k_core_numbers(hg, logger?)<br/>writes 'hgm.k_core' plane<br/>-> degeneracy (max k-core)"]
+    G --> I["neighborhood_density(hg, alpha, h)<br/>writes 'hgm.neighborhood_density' (double)"]
+    G --> J["one_hop_neighborhood_size(hg)<br/>writes 'hgm.neighborhood_size_1hop' (int)"]
+    G --> K["net_intersection_score(hg, logger?)<br/>writes 'hgm.net_intersection_score' (int)"]
 ```
 
 ## `congestion_metrics.cpp` — implementation
@@ -134,6 +141,96 @@ a survivor whose remaining degree dips under `d` still takes core number `d`.
 the call — the hypergraph's CSR structure is never mutated, only the output
 plane is written.
 
+### Function group: NESS neighborhood density (Spike C3)
+
+Adjacency here is the hypergraph relation — two vertices are one hop apart iff
+they share a hyperedge, so a hop expands `v -> every member of every
+hyperedge incident to v` (`vertexPinList()` then `pinList()`). `degree[v]` is
+the C1 incident-hyperedge count (`vertexOffsets()` slice length), precomputed
+once by `vertexDegrees` and reused as the NESS label weight.
+
+`propagate_neighborhood` (static, not in the header) is the shared BFS core of
+`neighborhood_density`. It runs one BFS per source `u`, accumulating decayed
+neighbor degree into `out[u]`. A monotonic `stamp[w] = u` marks "visited by
+source u at its shortest distance", so no per-source `O(n)` clear of the
+marker array is needed; `dist[w]` carries each visited vertex's BFS depth.
+
+```mermaid
+graph TD
+    A["propagate_neighborhood(hg, alpha, h, degree, out)"] --> B["alpha_pow[i] = alpha^i, i in [0,h]"]
+    B --> C["for each source u in [0, n):"]
+    C --> D["stamp[u]=u; dist[u]=0; queue={u}; acc=0"]
+    D --> E{"queue empty?"}
+    E -- yes --> F["out[u] = acc"]
+    E -- no --> G["v = pop_front; dv = dist[v]"]
+    G --> H{"dv >= h?"}
+    H -- yes --> E
+    H -- no --> I["for each incident edge e of v,<br/>for each member w of e:"]
+    I --> J{"stamp[w] == u?<br/>(u itself or already visited)"}
+    J -- yes --> I
+    J -- no --> K["stamp[w]=u; dist[w]=dv+1;<br/>acc += alpha_pow[dv+1] * degree[w];<br/>queue.push_back(w)"]
+    K --> I
+    I --> E
+    F --> C
+```
+
+`neighborhood_density(hg, alpha, h)` writes/zeroes the
+`"hgm.neighborhood_density"` double plane, short-circuits to all-zero when
+`numVertices()==0` or `h<=0` (and `alpha==0` naturally zeroes every term via
+`alpha_pow`), then calls `propagate_neighborhood`.
+
+```mermaid
+graph TD
+    A["neighborhood_density(hg, alpha, h)"] --> B["density = vertexDoublePlane('hgm.neighborhood_density'); fill 0"]
+    B --> C{"numVertices()==0 or h<=0?"}
+    C -- yes --> D["return (plane all-zero)"]
+    C -- no --> E["degree = vertexDegrees(hg)"]
+    E --> F["propagate_neighborhood(hg, alpha, h, degree, density)"]
+```
+
+`one_hop_neighborhood_size(hg)` is a single CSR pass, no BFS: for each `u`
+walk its incident edges and their members, epoch-stamp each distinct neighbor
+`w != u` once, and write the count to the `"hgm.neighborhood_size_1hop"` int
+plane.
+
+```mermaid
+graph TD
+    A["one_hop_neighborhood_size(hg)"] --> B["size = vertexIntPlane('hgm.neighborhood_size_1hop'); fill 0"]
+    B --> C["for each u: count=0"]
+    C --> D["for each incident edge e, each member w of e:"]
+    D --> E{"w==u or stamp[w]==u?"}
+    E -- yes --> D
+    E -- no --> F["stamp[w]=u; ++count"]
+    F --> D
+    D --> G["size[u] = count"]
+    G --> C
+```
+
+`net_intersection_score(hg, logger?)` sums, over each vertex `u`'s unordered
+pairs of incident hyperedges `(e1,e2)`, `|V(e1) ∩ V(e2)| - 1` (discounting
+`u`). A monotonic `epoch` stamps `e1`'s members, then `e2`'s members are
+counted against that stamp — no per-pair set allocation or clear. A degree
+above `kHighDegreeWarnThreshold` (64) triggers a `warn` (id 130) when a logger
+is attached, since the inner pair loop is quadratic in degree.
+
+```mermaid
+graph TD
+    A["net_intersection_score(hg, logger?)"] --> B["score = vertexIntPlane('hgm.net_intersection_score'); fill 0"]
+    B --> C["for each u: deg = incident edge count"]
+    C --> D{"logger && deg > 64?"}
+    D -- yes --> E["warn(UKN, 130, 'vertex may be slow')"]
+    D -- no --> F["for each incident edge e1 (index a):"]
+    E --> F
+    F --> G["++epoch; stamp all members of e1 with epoch"]
+    G --> H["for each incident edge e2 (index b>a):"]
+    H --> I["shared = count members of e2 with stamp==epoch"]
+    I --> J["total += shared - 1"]
+    J --> H
+    H --> F
+    F --> K["score[u] = total"]
+    K --> C
+```
+
 ## `timing_metrics.h` / `timing_metrics.cpp` — stub
 
 `timing_metrics.h` only pulls in `congestion_metrics.h` for the shared
@@ -164,9 +261,16 @@ sequenceDiagram
     hg_metrics->>Hypergraph: vertexOffsets()/vertexPinList()/hyperedgeOffsets()/pinList()
     hg_metrics->>Hypergraph: vertexIntPlane("hgm.k_core") (write)
     hg_metrics-->>Caller: degeneracy
+    Caller->>hg_metrics: neighborhood_density(hg, alpha, h)
+    hg_metrics->>Hypergraph: CSR arrays (read) + vertexDoublePlane("hgm.neighborhood_density") (write)
+    Caller->>hg_metrics: one_hop_neighborhood_size(hg)
+    hg_metrics->>Hypergraph: CSR arrays (read) + vertexIntPlane("hgm.neighborhood_size_1hop") (write)
+    Caller->>hg_metrics: net_intersection_score(hg, logger)
+    hg_metrics->>Hypergraph: CSR arrays (read) + vertexIntPlane("hgm.net_intersection_score") (write)
 ```
 
 The distribution functions never mutate the hypergraph — every arrow for
-them is a read of the existing CSR arrays. `k_core_numbers` is the one
-exception: it reads the same CSR arrays but *writes* the `"hgm.k_core"` int
-attribute plane (its only side effect; the CSR topology is untouched).
+them is a read of the existing CSR arrays. `k_core_numbers` and the three C3
+neighborhood functions are the exceptions: each reads the same CSR arrays but
+*writes* one `"hgm."` attribute plane as its only side effect; the CSR
+topology is untouched.

@@ -231,5 +231,150 @@ TEST(KCoreTest, OverwritesExistingPlane)
   }
 }
 
+// --- NESS neighborhood density (Spike C3) ---
+
+TEST(OneHopNeighborhoodTest, StarHyperedge)
+{
+  // A single 5-pin hyperedge: every vertex shares it, so each has 4 distinct
+  // 1-hop neighbors (itself excluded).
+  Hypergraph hg;
+  hg.buildFromTopology(5, {{0, 1, 2, 3, 4}});
+
+  one_hop_neighborhood_size(hg);
+  const std::vector<int>& size = hg.vertexIntPlane("hgm.neighborhood_size_1hop");
+  ASSERT_EQ(size.size(), 5u);
+  for (const int s : size) {
+    EXPECT_EQ(s, 4);
+  }
+}
+
+TEST(OneHopNeighborhoodTest, DisjointHyperedges)
+{
+  // Two disjoint 3-pin hyperedges sharing no vertex: each vertex's 1-hop
+  // neighborhood is its own hyperedge minus itself = 2.
+  Hypergraph hg;
+  hg.buildFromTopology(6, {{0, 1, 2}, {3, 4, 5}});
+
+  one_hop_neighborhood_size(hg);
+  const std::vector<int>& size = hg.vertexIntPlane("hgm.neighborhood_size_1hop");
+  ASSERT_EQ(size.size(), 6u);
+  for (const int s : size) {
+    EXPECT_EQ(s, 2);
+  }
+}
+
+TEST(OneHopNeighborhoodTest, IsolatedVertexScoresZero)
+{
+  // Vertex 3 is in no hyperedge -> no neighbors.
+  Hypergraph hg;
+  hg.buildFromTopology(4, {{0, 1, 2}});
+
+  one_hop_neighborhood_size(hg);
+  const std::vector<int>& size = hg.vertexIntPlane("hgm.neighborhood_size_1hop");
+  EXPECT_EQ(size[0], 2);
+  EXPECT_EQ(size[1], 2);
+  EXPECT_EQ(size[2], 2);
+  EXPECT_EQ(size[3], 0);
+}
+
+TEST(NeighborhoodDensityTest, OneHopHalfDecay)
+{
+  // Star of 2-pin edges: v0 has degree 3, leaves v1..v3 degree 1 each.
+  // h=1, alpha=0.5: A(u) = 0.5 * sum of degree over 1-hop neighbors.
+  //   A(0) = 0.5 * (deg1 + deg2 + deg3) = 0.5 * 3 = 1.5
+  //   A(leaf) = 0.5 * deg0 = 0.5 * 3 = 1.5
+  Hypergraph hg;
+  hg.buildFromTopology(4, {{0, 1}, {0, 2}, {0, 3}});
+
+  neighborhood_density(hg, 0.5, 1);
+  const std::vector<double>& d = hg.vertexDoublePlane("hgm.neighborhood_density");
+  ASSERT_EQ(d.size(), 4u);
+  EXPECT_DOUBLE_EQ(d[0], 1.5);
+  EXPECT_DOUBLE_EQ(d[1], 1.5);
+  EXPECT_DOUBLE_EQ(d[2], 1.5);
+  EXPECT_DOUBLE_EQ(d[3], 1.5);
+}
+
+TEST(NeighborhoodDensityTest, AlphaZeroAndHZeroAreAllZeros)
+{
+  Hypergraph hg;
+  hg.buildFromTopology(4, {{0, 1}, {0, 2}, {0, 3}});
+
+  neighborhood_density(hg, 0.0, 2);
+  {
+    const std::vector<double>& d
+        = hg.vertexDoublePlane("hgm.neighborhood_density");
+    for (const double v : d) {
+      EXPECT_DOUBLE_EQ(v, 0.0);
+    }
+  }
+
+  neighborhood_density(hg, 0.5, 0);
+  {
+    const std::vector<double>& d
+        = hg.vertexDoublePlane("hgm.neighborhood_density");
+    for (const double v : d) {
+      EXPECT_DOUBLE_EQ(v, 0.0);
+    }
+  }
+}
+
+TEST(NeighborhoodDensityTest, ChainMiddleDenserThanEnds)
+{
+  // Chain 0-1-2-3-4 via 2-pin edges. Degrees: 1,2,2,2,1.
+  // h=2, alpha=0.5. Hand computation:
+  //   A(2) = 0.5*(deg1+deg3) + 0.25*(deg0+deg4) = 0.5*4 + 0.25*2 = 2.5
+  //   A(0) = 0.5*deg1        + 0.25*deg2        = 0.5*2 + 0.25*2 = 1.5
+  Hypergraph hg;
+  hg.buildFromTopology(5, {{0, 1}, {1, 2}, {2, 3}, {3, 4}});
+
+  neighborhood_density(hg, 0.5, 2);
+  const std::vector<double>& d = hg.vertexDoublePlane("hgm.neighborhood_density");
+  ASSERT_EQ(d.size(), 5u);
+  EXPECT_DOUBLE_EQ(d[2], 2.5);
+  EXPECT_DOUBLE_EQ(d[0], 1.5);
+  EXPECT_DOUBLE_EQ(d[4], 1.5);
+  EXPECT_GT(d[2], d[0]);
+  EXPECT_GT(d[2], d[4]);
+}
+
+TEST(NetIntersectionScoreTest, SharedTripleMinusSelf)
+{
+  // e0={0,1,2,3}, e1={0,1,2,4}. Vertices 0,1,2 are incident to both edges;
+  // for each the two nets intersect in {0,1,2} (size 3), minus self = 2.
+  // Vertex 3 (only e0) and vertex 4 (only e1) have no pair -> 0. Vertex 5 is
+  // isolated -> 0.
+  Hypergraph hg;
+  hg.buildFromTopology(6, {{0, 1, 2, 3}, {0, 1, 2, 4}});
+
+  net_intersection_score(hg);
+  const std::vector<int>& score = hg.vertexIntPlane("hgm.net_intersection_score");
+  ASSERT_EQ(score.size(), 6u);
+  EXPECT_EQ(score[0], 2);
+  EXPECT_EQ(score[1], 2);
+  EXPECT_EQ(score[2], 2);
+  EXPECT_EQ(score[3], 0);  // incident to one hyperedge only
+  EXPECT_EQ(score[4], 0);  // incident to one hyperedge only
+  EXPECT_EQ(score[5], 0);  // no incident hyperedge
+}
+
+TEST(NessPlanesTest, AllThreePlanesExistWithCorrectShape)
+{
+  Hypergraph hg;
+  hg.buildFromTopology(5, {{0, 1}, {1, 2}, {2, 3}, {3, 4}});
+
+  neighborhood_density(hg);
+  one_hop_neighborhood_size(hg);
+  net_intersection_score(hg);
+
+  ASSERT_TRUE(hg.hasVertexPlane("hgm.neighborhood_density"));
+  ASSERT_TRUE(hg.hasVertexPlane("hgm.neighborhood_size_1hop"));
+  ASSERT_TRUE(hg.hasVertexPlane("hgm.net_intersection_score"));
+
+  EXPECT_EQ(hg.vertexDoublePlane("hgm.neighborhood_density").size(), 5u);
+  EXPECT_EQ(hg.vertexIntPlane("hgm.neighborhood_size_1hop").size(), 5u);
+  EXPECT_EQ(hg.vertexIntPlane("hgm.net_intersection_score").size(), 5u);
+}
+
 }  // namespace
 }  // namespace hgm

@@ -3,7 +3,9 @@
 #include "hg_metrics/congestion_metrics.h"
 
 #include <algorithm>
+#include <deque>
 #include <list>
+#include <vector>
 
 #include "support/logging.h"
 #include "utl/Logger.h"
@@ -16,6 +18,93 @@ namespace {
 // entry point, no CLI flag of its own — silent at verbosity 0/nullptr, per
 // the repo's debugPrint convention (see src/support/logging.h).
 constexpr const char* kGroup = "hg_metrics";
+
+// Message-id block for hg_metrics warn()/info() lines. The repo partitions
+// ids across the shared utl::UKN namespace (see src/support/logging.h:
+// hypergraph 100-119, fm 120-129, hello_odb 200-209, netlistgen 300-349);
+// hg_metrics claims 130-149. debugPrint takes no id, so only the C3
+// high-degree warning below needs one so far.
+constexpr int kMsgHighDegree = 130;
+
+// Above this incident-hyperedge count, net_intersection_score's per-vertex
+// pair enumeration (quadratic in degree) may be slow; warn once per such
+// vertex when a logger is attached.
+constexpr int kHighDegreeWarnThreshold = 64;
+
+// Per-vertex incident-hyperedge count read straight off the vertex-major CSR
+// offsets — the C1 "degree" convention, reused as the NESS label weight.
+std::vector<int> vertexDegrees(const eda::Hypergraph& hg)
+{
+  const std::vector<int>& v_off = hg.vertexOffsets();
+  std::vector<int> degree(hg.numVertices(), 0);
+  for (int v = 0; v < hg.numVertices(); ++v) {
+    degree[v] = v_off[v + 1] - v_off[v];
+  }
+  return degree;
+}
+
+// NESS information-propagation BFS. For each source vertex u, walks the
+// hypergraph out to h hops and accumulates
+//   A(u) = sum_{depth>=1} alpha^depth * sum_{v at that depth} degree(v)
+// into out[u]. Two vertices are adjacent iff they share a hyperedge, so the
+// BFS expands v -> every member of every hyperedge incident to v. `stamp[w]`
+// carries the source index that last visited w, giving O(1) "already visited
+// at a shorter distance" tests with no per-source O(n) clear of the marker
+// array. Not exposed in the header — a static helper per the C3 brief.
+void propagate_neighborhood(const eda::Hypergraph& hg,
+                            const double alpha,
+                            const int h,
+                            const std::vector<int>& degree,
+                            std::vector<double>& out)
+{
+  const int n = hg.numVertices();
+  const std::vector<int>& v_off = hg.vertexOffsets();
+  const std::vector<int>& v_pins = hg.vertexPinList();  // v -> incident edges
+  const std::vector<int>& e_off = hg.hyperedgeOffsets();
+  const std::vector<int>& e_pins = hg.pinList();         // e -> member vertices
+
+  // alpha_pow[i] = alpha^i, i in [0, h]. alpha == 0 makes every i >= 1 term
+  // zero, so A(u) == 0 for all u (and h == 0 never enters the depth loop).
+  std::vector<double> alpha_pow(h + 1, 1.0);
+  for (int i = 1; i <= h; ++i) {
+    alpha_pow[i] = alpha_pow[i - 1] * alpha;
+  }
+
+  std::vector<int> stamp(n, -1);  // source that last visited a vertex
+  std::vector<int> dist(n, 0);    // BFS depth of each visited vertex
+  std::deque<int> queue;
+
+  for (int u = 0; u < n; ++u) {
+    double acc = 0.0;
+    stamp[u] = u;
+    dist[u] = 0;
+    queue.clear();
+    queue.push_back(u);
+
+    while (!queue.empty()) {
+      const int v = queue.front();
+      queue.pop_front();
+      const int dv = dist[v];
+      if (dv >= h) {
+        continue;
+      }
+      for (int i = v_off[v]; i < v_off[v + 1]; ++i) {
+        const int e = v_pins[i];
+        for (int j = e_off[e]; j < e_off[e + 1]; ++j) {
+          const int w = e_pins[j];
+          if (stamp[w] == u) {
+            continue;  // source u itself, or already visited at <= this depth
+          }
+          stamp[w] = u;
+          dist[w] = dv + 1;
+          acc += alpha_pow[dv + 1] * degree[w];
+          queue.push_back(w);
+        }
+      }
+    }
+    out[u] = acc;
+  }
+}
 
 // index -> incident-hyperedge / member count, read straight off a CSR
 // offsets array: values[i] = offsets[i + 1] - offsets[i].
@@ -245,6 +334,104 @@ int k_core_numbers(eda::Hypergraph& hg, utl::Logger* logger)
   }
 
   return degeneracy;
+}
+
+void neighborhood_density(eda::Hypergraph& hg, const double alpha, const int h)
+{
+  std::vector<double>& density = hg.vertexDoublePlane("hgm.neighborhood_density");
+  std::fill(density.begin(), density.end(), 0.0);
+
+  if (hg.numVertices() == 0 || h <= 0) {
+    return;  // nothing to propagate; plane stays all-zero
+  }
+
+  const std::vector<int> degree = vertexDegrees(hg);
+  propagate_neighborhood(hg, alpha, h, degree, density);
+}
+
+void one_hop_neighborhood_size(eda::Hypergraph& hg)
+{
+  const int n = hg.numVertices();
+  std::vector<int>& size = hg.vertexIntPlane("hgm.neighborhood_size_1hop");
+  std::fill(size.begin(), size.end(), 0);
+  if (n == 0) {
+    return;
+  }
+
+  const std::vector<int>& v_off = hg.vertexOffsets();
+  const std::vector<int>& v_pins = hg.vertexPinList();
+  const std::vector<int>& e_off = hg.hyperedgeOffsets();
+  const std::vector<int>& e_pins = hg.pinList();
+
+  // Epoch stamp: a neighbor w counts once per source u even if reached through
+  // several incident hyperedges. No per-vertex O(n) clear needed.
+  std::vector<int> stamp(n, -1);
+  for (int u = 0; u < n; ++u) {
+    int count = 0;
+    for (int i = v_off[u]; i < v_off[u + 1]; ++i) {
+      const int e = v_pins[i];
+      for (int j = e_off[e]; j < e_off[e + 1]; ++j) {
+        const int w = e_pins[j];
+        if (w == u || stamp[w] == u) {
+          continue;
+        }
+        stamp[w] = u;
+        ++count;
+      }
+    }
+    size[u] = count;
+  }
+}
+
+void net_intersection_score(eda::Hypergraph& hg, utl::Logger* logger)
+{
+  const int n = hg.numVertices();
+  std::vector<int>& score = hg.vertexIntPlane("hgm.net_intersection_score");
+  std::fill(score.begin(), score.end(), 0);
+  if (n == 0) {
+    return;
+  }
+
+  const std::vector<int>& v_off = hg.vertexOffsets();
+  const std::vector<int>& v_pins = hg.vertexPinList();
+  const std::vector<int>& e_off = hg.hyperedgeOffsets();
+  const std::vector<int>& e_pins = hg.pinList();
+
+  // Membership scratch: stamp[w] == epoch marks w as a member of the "left"
+  // hyperedge of the current pair. A monotonic epoch avoids clearing between
+  // pairs (and between vertices).
+  std::vector<int> stamp(n, -1);
+  int epoch = 0;
+
+  for (int u = 0; u < n; ++u) {
+    const int deg = v_off[u + 1] - v_off[u];
+    if (logger != nullptr && deg > kHighDegreeWarnThreshold) {
+      logger->warn(utl::UKN, kMsgHighDegree,
+                   "net_intersection_score: vertex {} has degree {} (> {}); "
+                   "pair enumeration is quadratic and may be slow",
+                   u, deg, kHighDegreeWarnThreshold);
+    }
+
+    long long total = 0;
+    for (int a = v_off[u]; a < v_off[u + 1]; ++a) {
+      const int e1 = v_pins[a];
+      ++epoch;
+      for (int j = e_off[e1]; j < e_off[e1 + 1]; ++j) {
+        stamp[e_pins[j]] = epoch;
+      }
+      for (int b = a + 1; b < v_off[u + 1]; ++b) {
+        const int e2 = v_pins[b];
+        int shared = 0;
+        for (int j = e_off[e2]; j < e_off[e2 + 1]; ++j) {
+          if (stamp[e_pins[j]] == epoch) {
+            ++shared;
+          }
+        }
+        total += shared - 1;  // both e1 and e2 contain u; discount it
+      }
+    }
+    score[u] = static_cast<int>(total);
+  }
 }
 
 }  // namespace hgm

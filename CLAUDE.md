@@ -112,8 +112,9 @@ The convention:
 - **Tool id `utl::UKN`** for every eda-lab message (the pinned `ToolId`
   enum has no eda-lab tool). `info()`/`warn()` message ids are
   partitioned so they stay unique across the shared UKN namespace:
-  hypergraph 100–119, fm 120–129, hello_odb 200–209, netlistgen library
-  300–319, netlistgen CLI 320–349. `debug()` takes no id.
+  hypergraph 100–119, fm 120–129, hg_metrics 130–149, hello_odb 200–209,
+  netlistgen library 300–319, netlistgen CLI 320–349. `debug()` takes no
+  id.
 - **One debug group per component** — `"hypergraph"`, `"fm"`,
   `"netlistgen"`, `"hello_odb"` — so `-verbosity` lifts a whole run.
 - **Every executable takes an optional `-verbosity <level>`** flag

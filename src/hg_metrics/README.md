@@ -1,11 +1,12 @@
 # src/hg_metrics/
 
-Read-only metrics computed over an `eda::Hypergraph`, grouped by what they
-help diagnose: congestion (routability risk from degree/fanout distributions)
-and, in a later brief, timing. Every function takes the hypergraph `const`
-and reads its CSR topology directly — nothing here mutates the hypergraph or
-writes attribute planes. Attribute planes this module writes in later briefs
-carry the `"hgm."` prefix to keep the namespace distinct from other engines.
+Metrics computed over an `eda::Hypergraph`, grouped by what they help
+diagnose: congestion (routability risk from degree/fanout distributions and
+structural density) and, in a later brief, timing. The distribution
+functions take the hypergraph `const` and read its CSR topology directly;
+`k_core_numbers` (Spike C2) also reads only the CSR arrays but writes its
+result into an attribute plane. Attribute planes this module writes carry the
+`"hgm."` prefix to keep the namespace distinct from other engines.
 
 See FLOW.md for algorithmic flow diagrams.
 
@@ -28,6 +29,28 @@ Three metric groups, all backed by the hypergraph's dual CSR arrays:
   count is `>= threshold`. No default threshold — the caller must be
   explicit.
 
+### k-core decomposition (`k_core_numbers`)
+
+`k_core_numbers(hg, logger?)` computes the **k-core number** of every vertex
+— the largest `k` such that the vertex belongs to a subgraph in which every
+vertex has effective degree `>= k` — and writes it into the `"hgm.k_core"`
+int attribute plane (created if absent, overwritten in place if present).
+High k-core numbers mark dense, heavily-connected cores: structural proxies
+for routing congestion hot-spots. It is the one function here that takes the
+hypergraph by **non-const** reference (it writes the plane) and returns the
+**degeneracy** — the maximum k-core number found.
+
+Definitions follow C1: a vertex's degree is its incident-hyperedge count, and
+a hyperedge contributes to connectivity only while `>= 2` of its members
+remain active — once it drops to a single survivor it is effectively removed
+and that survivor loses one degree unit. Isolated (degree-0) vertices get
+k-core 0. The algorithm is the standard peeling method adapted for
+hypergraphs: an effective-degree bucket queue (`std::vector<std::list<int>>`
+indexed by degree, one iterator per vertex for O(1) removal) drives an
+O(n + pins) peel in non-decreasing degree order. Only the output plane is
+written; the CSR topology is never mutated. See FLOW.md for the peeling
+diagram.
+
 `DistributionStats { mean, p90, p99, max }` is defined once in
 `congestion_metrics.h` and reused by `timing_metrics.h`. `p90`/`p99` are
 nearest-rank percentiles over the sorted value set (`std::nth_element`,
@@ -44,9 +67,11 @@ functions).
 
 ## Input contract
 
-Reads only the hypergraph's CSR topology (`vertexOffsets()`,
-`hyperedgeOffsets()`, `numVertices()`, `numHyperedges()`) — no attribute
-planes are read or written by any function in this brief.
+The distribution functions read only the hypergraph's CSR topology
+(`vertexOffsets()`, `hyperedgeOffsets()`, `numVertices()`, `numHyperedges()`)
+and write no planes. `k_core_numbers` additionally reads `vertexPinList()`
+and `pinList()`, and **writes** the `"hgm.k_core"` int vertex plane (its only
+mutation — the CSR topology is left untouched).
 
 ## Control parameters
 
@@ -54,6 +79,7 @@ planes are read or written by any function in this brief.
 | --- | --- | --- | --- |
 | `threshold` (`high_fanout_nets`) | `int` | none — required | inclusive minimum pin count for a hyperedge to be reported |
 | `logger` (`*_stats` functions) | `utl::Logger*` | `nullptr` | optional; enables the verbosity-3 histogram summary line, group `"hg_metrics"` |
+| `logger` (`k_core_numbers`) | `utl::Logger*` | `nullptr` | optional; enables a verbosity-2 (heartbeat) degeneracy/mean/max summary line, group `"hg_metrics"` |
 
 ## Timing metrics (`timing_metrics.h/.cpp`)
 
@@ -78,3 +104,10 @@ known 4-vertex/3-hyperedge graph with sizes 2/3/4 (exact histogram counts,
 returns the two larger hyperedges, `>= 99` returns nothing); and a star
 hypergraph (one vertex in every hyperedge) confirming that vertex's degree
 equals `numHyperedges()`.
+
+The `KCoreTest` suite covers k-core decomposition: isolated vertices (all
+k-core 0), a path graph (1-degenerate, all k-core 1), a 4-clique (all k-core
+3), a single 5-pin star hyperedge (all k-core 1), a dense-core/sparse-
+periphery graph (core vertices strictly above the periphery), the returned
+degeneracy matching the plane's max, and a re-run overwriting the plane
+cleanly rather than accumulating.

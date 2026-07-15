@@ -59,4 +59,19 @@ DistributionStats hyperedge_size_stats(const eda::Hypergraph& hg,
 std::vector<HyperedgeId> high_fanout_nets(const eda::Hypergraph& hg,
                                           int threshold);
 
+// --- k-core decomposition ---
+
+// Computes the k-core number of every vertex and writes it into the
+// "hgm.k_core" int attribute plane on hg (created if absent, overwritten in
+// place if present). A vertex's k-core number is the largest k such that it
+// belongs to a subgraph in which every vertex has effective degree >= k;
+// high values mark dense, heavily-connected cores — structural proxies for
+// routing congestion hot-spots. Degree is the incident-hyperedge count (C1
+// convention); a hyperedge contributes to connectivity while >= 2 of its
+// members remain active, and stops the moment it drops to a single survivor.
+// Isolated (degree-0) vertices get k-core 0. Returns the degeneracy — the
+// maximum k-core number found. The optional logger emits a verbosity-2
+// (heartbeat) summary line (group "hg_metrics"), silent otherwise.
+int k_core_numbers(eda::Hypergraph& hg, utl::Logger* logger = nullptr);
+
 }  // namespace hgm

@@ -10,8 +10,12 @@ attribute plane. Spike C3 adds three label-weighted neighborhood metrics —
 and `net_intersection_score` — each reading the CSR arrays and writing its own
 per-vertex `"hgm."` plane. Spike C4 adds `tangle_score`, the local Rent
 exponent of each vertex's k-hop induced subgraph (computed inline during a
-BFS, never materialized), written to `"hgm.tangle_score"`. A stub
-`timing_metrics.h/.cpp` keeps the build complete for a later brief.
+BFS, never materialized), written to `"hgm.tangle_score"`. Spike C5
+(`congestion_scoring.h/.cpp`) is an aggregation layer over C2–C4:
+`score_congestion` blends the three planes into a 1–5 `"hgm.congestion_score"`,
+and `find_congestion_clusters` groups adjacent high-score vertices into
+subclusters. A stub `timing_metrics.h/.cpp` keeps the build complete for a
+later brief.
 
 ## `congestion_metrics.h` — API contract
 
@@ -286,6 +290,102 @@ therefore has `T == 0` and scores 0. The `internal` set and the two scratch
 `unordered_set`s are the only per-vertex state — the CSR arrays are read-only,
 and only the output plane is written.
 
+## `congestion_scoring.h` / `congestion_scoring.cpp` — composite scoring (Spike C5)
+
+C5 sits **above** C2–C4: it reads their planes and never calls them. Two public
+functions in namespace `hgm`, plus three file-scope static helpers
+(`percentile_ranks`, `to_score`, `percentile_of_sorted`).
+
+### `score_congestion` — percentile blend → quintile bin
+
+Validates weights and required-plane existence, resolves the scope, computes a
+within-scope percentile rank per metric, blends them with the weights, bins the
+composite onto 1–5, and writes only the scope positions of the
+`"hgm.congestion_score"` int plane. It returns `eda::Status` and populates a
+`CongestionReport` (histogram, clusters, `mean_composite`/`p90_composite`).
+
+```mermaid
+graph TD
+    A["score_congestion(hg, report_out, weights, scope, logger)"] --> B["report_out = {}"]
+    B --> C{"abs(Σweights − 1) > 1e-6?"}
+    C -- yes --> Cerr["return InvalidConfig error (nothing written)"]
+    C -- no --> D{"all of k_core / neighborhood_density / tangle_score planes exist?"}
+    D -- no --> Derr["return InvalidConfig error (nothing written)"]
+    D -- yes --> E{"scope empty?"}
+    E -- yes --> F["active = [0, n)"]
+    E -- no --> G{"any index out of [0, n)?"}
+    G -- yes --> Gerr["return InvalidConfig error (nothing written)"]
+    G -- no --> H["active = scope"]
+    F --> I["read kcore(int→double), density, tangle;<br/>flag all-zero-over-scope per plane"]
+    H --> I
+    I --> J["r_kcore = percentile_ranks(kcore_d, active)<br/>r_density = percentile_ranks(density, active)<br/>r_tangle = percentile_ranks(tangle, active)"]
+    J --> K["out = vertexIntPlane('hgm.congestion_score')<br/>(no blanket fill — keep out-of-scope values)"]
+    K --> L["for v in active:<br/>composite = wk*r_kcore[v] + wn*r_density[v] + wt*r_tangle[v]<br/>out[v] = to_score(composite); ++histogram[score]"]
+    L --> M["mean_composite, p90_composite over active composites"]
+    M --> N["report_out.clusters = find_congestion_clusters(hg, 1, scope, logger)"]
+    N --> O{"logger?"}
+    O -- yes --> P["warn id 132 per all-zero plane;<br/>debugPrint L1 band summary"]
+    O -- no --> Q["return okStatus"]
+    P --> Q
+```
+
+`percentile_ranks(all_values, indices)` ranks each scope vertex against the
+scope: `rank = lower_bound(sorted_scope, value) / (N−1)`, so the scope min → 0.0
+and max → 1.0. A fully-tied scope (`sorted.front() == sorted.back()`, which
+includes a single-vertex scope) short-circuits every rank to `0.5` → score 3,
+sidestepping the `N−1` divide-by-zero. `to_score` is the quintile map.
+
+```mermaid
+graph TD
+    A["percentile_ranks(all_values, indices)"] --> B["sorted = sort(values at indices); N = |indices|"]
+    B --> C{"sorted.front() == sorted.back()?"}
+    C -- yes --> D["rank[idx] = 0.5 for all idx (all tied / single vertex)"]
+    C -- no --> E["rank[idx] = lower_bound(sorted, value[idx]) / (N−1)"]
+
+    F["to_score(composite)"] --> G["<0.2→1 · <0.4→2 · <0.6→3 · <0.8→4 · else→5"]
+```
+
+### `find_congestion_clusters` — BFS connected components
+
+Reads the `"hgm.congestion_score"` plane, builds the eligible set (in scope AND
+`score >= min_score`), and BFS-floods connected components using **both** CSR
+directions: vertex-major to list a vertex's incident hyperedges, hyperedge-major
+to list each hyperedge's members. Seeds are visited in ascending index order and
+`visited` is stamped on enqueue, so both the partition and each cluster's member
+order are deterministic. Clusters are sorted by `peak_score` desc then `size`
+desc (the discovery-order `cluster_id` stays attached).
+
+```mermaid
+graph TD
+    A["find_congestion_clusters(hg, min_score, scope, logger)"] --> B{"n==0 or no 'hgm.congestion_score' plane?"}
+    B -- yes --> Z["return {}"]
+    B -- no --> C["eligible[v] = (scope empty or v in scope) and score[v] >= min_score"]
+    C --> D["for seed in [0, n) ascending:"]
+    D --> E{"eligible[seed] and not visited[seed]?"}
+    E -- no --> D
+    E -- yes --> F["BFS: queue={seed}; visited[seed]=1; members=[]"]
+    F --> G{"queue empty?"}
+    G -- no --> H["u = pop_front; members.push_back(u)"]
+    H --> I["for each incident edge e of u (vertex-major CSR),<br/>each member w of e (edge-major CSR):"]
+    I --> J{"eligible[w] and not visited[w]?"}
+    J -- yes --> K["visited[w]=1; queue.push_back(w)"]
+    J -- no --> I
+    K --> I
+    I --> G
+    G -- yes --> L["cluster{ id=cluster_id++, peak=max score, mean=mean score,<br/>size, members }; push"]
+    L --> D
+    D --> M["sort clusters: peak_score desc, then size desc"]
+    M --> N{"logger?"}
+    N -- yes --> O["debugPrint L2 count/largest;<br/>debugPrint L3 per-cluster members (cap kTraceCap)"]
+    N -- no --> P["return clusters"]
+    O --> P
+```
+
+`mean_score` is the mean of members' **binned** scores (1–5): C5 persists only
+the int score plane, so the standalone clustering function has no raw composite
+to average. `find_congestion_clusters` takes `hg` by non-const reference because
+`eda::Hypergraph` has no `const` int-plane reader; it still only reads.
+
 ## `timing_metrics.h` / `timing_metrics.cpp` — stub
 
 `timing_metrics.h` only pulls in `congestion_metrics.h` for the shared
@@ -324,10 +424,19 @@ sequenceDiagram
     hg_metrics->>Hypergraph: CSR arrays (read) + vertexIntPlane("hgm.net_intersection_score") (write)
     Caller->>hg_metrics: tangle_score(hg, k_hop_radius, logger)
     hg_metrics->>Hypergraph: CSR arrays (read) + vertexDoublePlane("hgm.tangle_score") (write)
+    Caller->>hg_metrics: score_congestion(hg, report, weights, scope)
+    hg_metrics->>Hypergraph: read "hgm.k_core"/"hgm.neighborhood_density"/"hgm.tangle_score"
+    hg_metrics->>Hypergraph: vertexIntPlane("hgm.congestion_score") (write scope only)
+    hg_metrics-->>Caller: eda::Status + CongestionReport
+    Caller->>hg_metrics: find_congestion_clusters(hg, min_score, scope)
+    hg_metrics->>Hypergraph: read "hgm.congestion_score" + CSR arrays (both directions)
+    hg_metrics-->>Caller: vector<CongestionCluster> (sorted peak desc, size desc)
 ```
 
 The distribution functions never mutate the hypergraph — every arrow for
 them is a read of the existing CSR arrays. `k_core_numbers`, the three C3
-neighborhood functions, and `tangle_score` are the exceptions: each reads the
-same CSR arrays but *writes* one `"hgm."` attribute plane as its only side
-effect; the CSR topology is untouched.
+neighborhood functions, `tangle_score`, and (C5) `score_congestion` are the
+exceptions: each reads CSR arrays (and, for C5, the C2–C4 planes) but *writes*
+one `"hgm."` attribute plane as its only side effect; the CSR topology is
+untouched. `find_congestion_clusters` writes nothing — it only reads the
+`"hgm.congestion_score"` plane and both CSR directions.

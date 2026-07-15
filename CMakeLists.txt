@@ -62,7 +62,8 @@ target_link_libraries(partitioning PUBLIC hypergraph odb utl ord_shim)
 
 add_library(hg_metrics
   src/hg_metrics/congestion_metrics.cpp
-  src/hg_metrics/timing_metrics.cpp)
+  src/hg_metrics/timing_metrics.cpp
+  src/hg_metrics/congestion_scoring.cpp)
 target_include_directories(hg_metrics PUBLIC src)
 target_link_libraries(hg_metrics PUBLIC hypergraph odb utl)
 
@@ -174,6 +175,12 @@ target_link_libraries(hg_metrics_congestion_test PRIVATE hg_metrics hypergraph
                                                          odb utl GTest::gtest
                                                          GTest::gtest_main)
 
+add_executable(hg_metrics_congestion_scoring_test
+               test/hg_metrics_congestion_scoring_test.cpp)
+target_link_libraries(hg_metrics_congestion_scoring_test
+                      PRIVATE hg_metrics hypergraph odb utl
+                              GTest::gtest GTest::gtest_main)
+
 # CLI --help / usage convention: unit-tests support/cli.h and spawns both CLI
 # binaries to confirm --help (exit 0) and missing-argument (exit nonzero) share
 # one option-description source. Header-only helper — no odb/utl link needed.
@@ -212,5 +219,7 @@ add_test(NAME netlistgen_wellformed_test COMMAND netlistgen_wellformed_test)
 add_test(NAME netlistgen_verilog_test COMMAND netlistgen_verilog_test)
 add_test(NAME fm_partitioner_test COMMAND fm_partitioner_test)
 add_test(NAME hg_metrics_congestion_test COMMAND hg_metrics_congestion_test)
+add_test(NAME hg_metrics_congestion_scoring_test
+         COMMAND hg_metrics_congestion_scoring_test)
 add_test(NAME cli_help_test COMMAND cli_help_test)
 add_test(NAME error_handling_test COMMAND error_handling_test)

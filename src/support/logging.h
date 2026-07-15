@@ -38,7 +38,8 @@
 //     130-149, hello_odb 200-209, netlistgen library 300-319, netlistgen CLI
 //     320-349.
 //   - Debug groups: one per component ("hypergraph", "fm", "netlistgen",
-//     "hello_odb"), so raising -verbosity lifts detail for a whole run.
+//     "hg_metrics", "hello_odb"), so raising -verbosity lifts detail for a
+//     whole run.
 //   - Verbosity levels (the integer passed to -verbosity / setDebugLevel):
 //       0  default: phase markers (info, at the executable layer) plus a final
 //          summary and any warnings/errors. Library internals stay silent.

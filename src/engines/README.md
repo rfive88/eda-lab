@@ -22,6 +22,13 @@ the `dbBlock` a hypergraph is built from.
   plane `area`, both optional), plus a procedural random hypergraph
   generator for engine testing. See `partitioning/README.md` for the
   full plane contract and every `FMParams` option.
+- `structural_metrics/` — Spike SM1 analysis engine: drives the `hg_metrics`
+  congestion group (C1–C5) end to end over an already-built `eda::Hypergraph`
+  and renders a report. Core library (`structural_metrics_core`, no ODB
+  loading) plus a thin CLI (`structural_metrics_cli`) that loads LEF+DEF or a
+  native `.odb`. Writes the `hgm.*` planes as a side effect (via the
+  `hg_metrics` kernels); timing analysis (T0–T4) is SM2. See
+  `structural_metrics/README.md` and `structural_metrics/FLOW.md`.
 
 ## Convention: every engine ships its own README.md
 

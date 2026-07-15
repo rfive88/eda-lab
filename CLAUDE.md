@@ -113,10 +113,11 @@ The convention:
   enum has no eda-lab tool). `info()`/`warn()` message ids are
   partitioned so they stay unique across the shared UKN namespace:
   hypergraph 100–119, fm 120–129, hg_metrics 130–149, hello_odb 200–209,
-  netlistgen library 300–319, netlistgen CLI 320–349. `debug()` takes no
-  id.
+  netlistgen library 300–319, netlistgen CLI 320–349, structural_metrics
+  core 350–374, structural_metrics CLI 375–399. `debug()` takes no id.
 - **One debug group per component** — `"hypergraph"`, `"fm"`,
-  `"netlistgen"`, `"hello_odb"` — so `-verbosity` lifts a whole run.
+  `"netlistgen"`, `"hello_odb"`, `"structural_metrics"` — so `-verbosity`
+  lifts a whole run.
 - **Every executable takes an optional `-verbosity <level>`** flag
   (`--verbosity=<level>` too), mapped straight onto `setDebugLevel` via
   `eda::applyVerbosity()`. Levels: **0** (default) phase markers at the
@@ -261,6 +262,8 @@ an abort/segfault.
 - `src/engines/netlistgen/` — programmatic netlist construction, synthetic
   or LEF-backed, with DEF/`.odb` output (see below).
 - `src/engines/partitioning/` — Stage 1 partitioning engine (see below).
+- `src/engines/structural_metrics/` — SM1 engine driving hg_metrics C1–C5
+  end to end (core library + CLI); see below.
 - `src/hg_metrics/` — congestion/timing metrics over the hypergraph (see
   below).
 - `test/` — GTest suites; `EDA_LAB_DATA_DIR` points at `data/`.
@@ -486,6 +489,44 @@ swig/Tcl-wrapper members (they can satisfy stray weak std:: symbols) drags in
 references to OpenROAD-application globals. `ord_shim` (linked via
 `netlistgen`) defines those globals inertly; link it into any new target that
 hits `undefined reference to ord::getLogger()` / `ord::OpenRoad::openRoad()`.
+
+## Structural metrics engine (SM1)
+
+`src/engines/structural_metrics/` — drives the `hg_metrics` congestion group
+(C1–C5) end to end and renders a report. Two layers, mirroring
+netlistgen/netlistgen_cli_core:
+
+- **`structural_metrics_core`** (`structural_metrics.h/.cpp`, namespace `sm`):
+  `run_congestion_analysis(hg, result_out, logger, hf_threshold=20, weights={})`
+  runs C1→C2→C3→C4→C5 in that fixed order on an **already-built** `Hypergraph`
+  (no ODB loading in the library), writing every `hgm.*` plane as a side effect
+  and returning a `CongestionAnalysisResult` (dimensions + C1–C4 distribution
+  summaries + C5 `CongestionReport`). `print_congestion_report` renders it via
+  `logger->report()` (`[ Design ]`, `[ Congestion Score ]`, `[ Supporting
+  Metrics ]`, placeholder `[ Timing ]`). Because SM1 must not modify
+  `src/hg_metrics/`, the core carries its own file-scope
+  `stats_from_double_plane` (same nearest-rank percentile convention as
+  `hgm::vertex_degree_stats`) to summarise the C3/C4 double planes, and lifts
+  the int `hgm.net_intersection_score` plane through a temporary
+  `sm.net_intersection_d` plane (removed after) for its stats.
+- **`structural_metrics_cli`** (`structural_metrics_cli.cpp`): thin `main()`
+  handling all ODB loading and arg parsing. `--lef <path>` is **repeatable**
+  (first = tech via `createTechAndLib`, rest = cells via `createLib`) and pairs
+  with `--def`; `--odb <path>` loads a native `.odb` via `dbDatabase::read` and
+  is mutually exclusive with `--lef`/`--def`. `--hf-threshold` (default 20),
+  `-verbosity`. Three-layer error handling (prechecks, boundary try/catch at
+  the reader/stream calls, top-level `main()` catch). (The repeatable `--lef`
+  generalises the brief's single-`--lef` sketch to match hello_odb's tech+cell
+  pattern and this repo's split Nangate45 LEFs.)
+
+Timing analysis (T0–T4) is deferred to SM2. Note the fixed hg_metrics kernels
+saturate on the available inputs (synthetic tangle → all ~1.0; gcd density
+near-uniform and tangle → 0), so the C5 score compresses to 2–3 bands rather
+than the brief's illustrative five-band spread — the engine reports faithfully
+whatever the kernels produce (see `src/engines/structural_metrics/README.md`,
+"Score distribution"). Tests: `test/structural_metrics_test.cpp` (in-process
+core via netlistgen + subprocess CLI smoke tests). Full details in
+`src/engines/structural_metrics/README.md`; flow in its `FLOW.md`.
 
 Note: the filesystem is case-insensitive here — `CLAUDE.md` and `Claude.md`
 are the same file.

@@ -67,6 +67,20 @@ add_library(hg_metrics
 target_include_directories(hg_metrics PUBLIC src)
 target_link_libraries(hg_metrics PUBLIC hypergraph odb utl)
 
+# structural_metrics engine (Spike SM1): drives hg_metrics C1-C5 end to end.
+# Core library: no ODB loading inside — takes an already-built Hypergraph.
+add_library(structural_metrics_core
+  src/engines/structural_metrics/structural_metrics.cpp)
+target_include_directories(structural_metrics_core PUBLIC src)
+target_link_libraries(structural_metrics_core
+                      PUBLIC hg_metrics hypergraph odb utl)
+
+# CLI: thin main() — handles ODB loading and arg parsing.
+add_executable(structural_metrics_cli
+  src/engines/structural_metrics/structural_metrics_cli.cpp)
+target_link_libraries(structural_metrics_cli
+                      PRIVATE structural_metrics_core)
+
 enable_testing()
 find_package(GTest REQUIRED)
 
@@ -181,6 +195,18 @@ target_link_libraries(hg_metrics_congestion_scoring_test
                       PRIVATE hg_metrics hypergraph odb utl
                               GTest::gtest GTest::gtest_main)
 
+# Spike SM1: structural_metrics core library (in-process via netlistgen) plus
+# subprocess smoke tests of the structural_metrics_cli binary (LEF+DEF, .odb,
+# missing-arg, missing-file, --help).
+add_executable(structural_metrics_test test/structural_metrics_test.cpp)
+target_compile_definitions(structural_metrics_test
+  PRIVATE EDA_LAB_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+          STRUCTURAL_METRICS_CLI_BIN="$<TARGET_FILE:structural_metrics_cli>")
+target_link_libraries(structural_metrics_test
+  PRIVATE structural_metrics_core netlistgen hg_metrics hypergraph odb utl
+          GTest::gtest GTest::gtest_main)
+add_dependencies(structural_metrics_test structural_metrics_cli)
+
 # CLI --help / usage convention: unit-tests support/cli.h and spawns both CLI
 # binaries to confirm --help (exit 0) and missing-argument (exit nonzero) share
 # one option-description source. Header-only helper — no odb/utl link needed.
@@ -221,5 +247,6 @@ add_test(NAME fm_partitioner_test COMMAND fm_partitioner_test)
 add_test(NAME hg_metrics_congestion_test COMMAND hg_metrics_congestion_test)
 add_test(NAME hg_metrics_congestion_scoring_test
          COMMAND hg_metrics_congestion_scoring_test)
+add_test(NAME structural_metrics_test COMMAND structural_metrics_test)
 add_test(NAME cli_help_test COMMAND cli_help_test)
 add_test(NAME error_handling_test COMMAND error_handling_test)

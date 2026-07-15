@@ -36,10 +36,11 @@
 //     by debug()) are partitioned per component so they stay unique across the
 //     shared UKN namespace: hypergraph 100-119, fm 120-129, hg_metrics
 //     130-149, hello_odb 200-209, netlistgen library 300-319, netlistgen CLI
-//     320-349.
+//     320-349, structural_metrics core 350-374, structural_metrics CLI
+//     375-399.
 //   - Debug groups: one per component ("hypergraph", "fm", "netlistgen",
-//     "hg_metrics", "hello_odb"), so raising -verbosity lifts detail for a
-//     whole run.
+//     "hg_metrics", "hello_odb", "structural_metrics"), so raising -verbosity
+//     lifts detail for a whole run.
 //   - Verbosity levels (the integer passed to -verbosity / setDebugLevel):
 //       0  default: phase markers (info, at the executable layer) plus a final
 //          summary and any warnings/errors. Library internals stay silent.

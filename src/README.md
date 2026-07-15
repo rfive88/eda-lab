@@ -12,3 +12,4 @@ own README with the details.
 | `netlistgen/` | Programmatic netlist construction (no LEF/DEF) for tests and benchmarks |
 | `engines/` | Partitioning/clustering algorithm engines (currently empty) |
 | `support/` | Link-time shims for embedding odb/utl without the OpenROAD application |
+| `hg_metrics/` | Congestion/timing metrics computed over an `eda::Hypergraph` |

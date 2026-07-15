@@ -7,7 +7,7 @@ GTest suites for eda-lab.
 ```bash
 cmake -B build              # Debug tree; build-release/ is the Release tree
 cmake --build build
-ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_stageb_test|netlistgen_stagec_test|netlistgen_staged_test|netlistgen_peak_cluster_test|netlistgen_rent_test|netlistgen_wellformed_test|netlistgen_link_smoke|fm_partitioner_test|cli_help_test|error_handling_test" --output-on-failure
+ctest --test-dir build -R "hypergraph_test|netlistgen_test|netlistgen_stageb_test|netlistgen_stagec_test|netlistgen_staged_test|netlistgen_peak_cluster_test|netlistgen_rent_test|netlistgen_wellformed_test|netlistgen_link_smoke|fm_partitioner_test|hg_metrics_congestion_test|cli_help_test|error_handling_test" --output-on-failure
 ```
 
 The `-R` filter matters: a bare `ctest` also picks up the vendored OpenROAD
@@ -180,6 +180,17 @@ cd run
     Nangate45 + gcd DEF loaded once per suite, then 2-way and 4-way runs
     checking balance, reported-cost consistency, determinism, and strict
     cut improvement over a topology-blind initial on real topology.
+- `hg_metrics_congestion_test.cpp` — Spike C1 of `src/hg_metrics/`: vertex
+  degree distribution, hyperedge size (fanout) distribution, and
+  high-fanout net identification. dbBlock-free hypergraphs only
+  (`buildFromTopology`), no data files needed. Covers: an empty hypergraph
+  (every function returns empty/zeroed results, no crash); a single vertex
+  with no hyperedges (`{0: 1}` degree histogram, empty size histogram); a
+  hand-built 4-vertex/3-hyperedge graph with sizes 2/3/4 (exact histogram
+  counts, `max == 4`, `p90`/`p99` within the known range); high-fanout
+  thresholding (`>= 3` returns exactly the two larger hyperedges, `>= 99`
+  returns nothing); and a star hypergraph (one vertex in every hyperedge)
+  confirming that vertex's degree equals `numHyperedges()`.
 
 ## Input sources
 
@@ -191,7 +202,8 @@ cd run
   LEF/DEF): `netlistgen_test.cpp` and `netlistgen_link_smoke.cpp`.
 - dbBlock-free hypergraphs via `buildFromTopology` /
   `generateRandomHypergraph`: `HypergraphTopologyTest`,
-  `RandomHypergraphTest`, `FMPartitionerTest`.
+  `RandomHypergraphTest`, `FMPartitionerTest`,
+  `hg_metrics_congestion_test.cpp`.
 
 ## Convention
 

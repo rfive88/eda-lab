@@ -260,6 +260,8 @@ an abort/segfault.
 - `src/engines/netlistgen/` — programmatic netlist construction, synthetic
   or LEF-backed, with DEF/`.odb` output (see below).
 - `src/engines/partitioning/` — Stage 1 partitioning engine (see below).
+- `src/hg_metrics/` — congestion/timing metrics over the hypergraph (see
+  below).
 - `test/` — GTest suites; `EDA_LAB_DATA_DIR` points at `data/`.
 - `data/` — Nangate45 LEF + `gcd_nangate45.def` test design.
 - `run/` — git-ignored working directory for manual runs and their output
@@ -457,6 +459,26 @@ clamped to `[2, num_vertices]`.
 
 Tests: `test/fm_partitioner_test.cpp` (only the gcd-design tests need
 `EDA_LAB_DATA_DIR`). Full details in `src/engines/partitioning/README.md`.
+
+## Congestion/timing metrics (hg_metrics)
+
+`src/hg_metrics/` — read-only metrics over an `eda::Hypergraph`'s CSR
+topology, grouped by concern rather than being one engine. Spike C1
+implements the congestion group in `congestion_metrics.h/.cpp`: vertex
+degree distribution (`vertex_degree_histogram`/`vertex_degree_stats`),
+hyperedge size / fanout distribution
+(`hyperedge_size_histogram`/`hyperedge_size_stats`), and high-fanout net
+identification (`high_fanout_nets(hg, threshold)`, inclusive threshold, no
+default). `DistributionStats` (`mean`, `p90`, `p99`, `max`; nearest-rank
+percentiles via `std::nth_element`) is defined once in
+`congestion_metrics.h` and reused by `timing_metrics.h`, which is a stub
+(header + TODO) pending a later brief. Pure library: every function takes
+the hypergraph `const`, reads only `vertexOffsets()`/`hyperedgeOffsets()`,
+writes no attribute planes (planes this module writes in later briefs are
+prefixed `"hgm."`). `*_stats` functions take an optional trailing
+`utl::Logger* logger = nullptr` that emits a verbosity-3 debug summary
+(group `"hg_metrics"`) when attached. Full details in
+`src/hg_metrics/README.md`; tests in `test/hg_metrics_congestion_test.cpp`.
 
 Linking gotcha: any new object that makes the linker touch `utl.a`'s
 swig/Tcl-wrapper members (they can satisfy stray weak std:: symbols) drags in
